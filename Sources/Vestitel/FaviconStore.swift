@@ -12,6 +12,45 @@ final class FaviconStore: ObservableObject {
     @Published private(set) var icons: [String: NSImage] = [:]
     private var attempted: Set<String> = []
     private var menuIcons: [String: NSImage] = [:]
+    /// Hosts whose icon is predominantly dark and needs a light backing
+    /// plate to stay visible on dark backgrounds (the "Slack fix").
+    private var darkIcons: Set<String> = []
+
+    func needsPlate(for host: String) -> Bool {
+        darkIcons.contains(host)
+    }
+
+    private func register(_ image: NSImage, for host: String) {
+        if Self.isPredominantlyDark(image) {
+            darkIcons.insert(host)
+        }
+        icons[host] = image
+    }
+
+    /// Mean luminance of the icon's visible pixels, sampled on a 16×16 grid.
+    private static func isPredominantlyDark(_ image: NSImage) -> Bool {
+        guard let tiff = image.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff) else { return false }
+        let w = rep.pixelsWide, h = rep.pixelsHigh
+        guard w > 0, h > 0 else { return false }
+        var luminance = 0.0
+        var samples = 0.0
+        let stepX = max(1, w / 16), stepY = max(1, h / 16)
+        var y = 0
+        while y < h {
+            var x = 0
+            while x < w {
+                if let c = rep.colorAt(x: x, y: y), c.alphaComponent > 0.2 {
+                    luminance += Double(c.redComponent + c.greenComponent + c.blueComponent) / 3
+                    samples += 1
+                }
+                x += stepX
+            }
+            y += stepY
+        }
+        guard samples > 8 else { return false }
+        return luminance / samples < 0.4
+    }
 
     private let cacheDir: URL = {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -29,9 +68,16 @@ final class FaviconStore: ObservableObject {
     func menuIcon(for host: String, size: CGFloat = 14) -> NSImage? {
         if let cached = menuIcons[host] { return cached }
         guard let full = icons[host] else { return nil }
+        let plated = needsPlate(for: host)
         let resized = NSImage(size: NSSize(width: size, height: size), flipped: false) { rect in
             NSBezierPath(roundedRect: rect, xRadius: size * 0.2, yRadius: size * 0.2).addClip()
-            full.draw(in: rect)
+            if plated {
+                NSColor.white.withAlphaComponent(0.92).setFill()
+                rect.fill()
+                full.draw(in: rect.insetBy(dx: size * 0.11, dy: size * 0.11))
+            } else {
+                full.draw(in: rect)
+            }
             return true
         }
         menuIcons[host] = resized
@@ -44,7 +90,7 @@ final class FaviconStore: ObservableObject {
 
         let file = cacheDir.appendingPathComponent("\(host).png")
         if let cached = NSImage(contentsOf: file) {
-            icons[host] = cached
+            register(cached, for: host)
             return
         }
 
@@ -57,7 +103,7 @@ final class FaviconStore: ObservableObject {
 
             for url in candidates {
                 guard let image = await Self.fetchImage(from: url) else { continue }
-                icons[host] = image
+                register(image, for: host)
                 if let tiff = image.tiffRepresentation,
                    let rep = NSBitmapImageRep(data: tiff),
                    let png = rep.representation(using: .png, properties: [:]) {
@@ -132,11 +178,22 @@ struct SourceMark: View {
 
     var body: some View {
         if let host, let image = store.icon(for: host) {
-            Image(nsImage: image)
-                .resizable()
-                .scaledToFit()
-                .frame(width: size, height: size)
-                .clipShape(RoundedRectangle(cornerRadius: size * 0.2))
+            let plated = store.needsPlate(for: host)
+            ZStack {
+                if plated {
+                    RoundedRectangle(cornerRadius: size * 0.2)
+                        .fill(Color.white.opacity(0.92))
+                }
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(
+                        width: plated ? size - 3 : size,
+                        height: plated ? size - 3 : size
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: size * 0.15))
+            }
+            .frame(width: size, height: size)
         } else {
             Circle()
                 .fill(color)
