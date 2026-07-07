@@ -1,0 +1,4 @@
+.build/
+.swiftpm/
+Vestitel.app/
+.DS_Store
