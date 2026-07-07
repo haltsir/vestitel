@@ -27,20 +27,25 @@ struct VestitelApp: App {
         // strictly monochrome in every state.
         let allowColor = store.settings.allowColoredIcon
         let hasInboxArticles = store.articles.contains { $0.state == .inbox }
+        // Head tilt + downcast eyes only while the popover is open (and
+        // there's something in the inbox to look at); upright when closed.
+        let lookDown = store.popoverOpen && hasInboxArticles
         let icon: NSImage = {
             if let frame = store.iconAnimationFrame {
                 return allowColor ? MenuBarIcon.coloredFrames[frame] : MenuBarIcon.templateFrames[frame]
             }
             if allowColor {
                 if store.hasUnseenArticles {
-                    return hasInboxArticles ? MenuBarIcon.coloredDown : MenuBarIcon.colored
+                    return lookDown ? MenuBarIcon.coloredDown : MenuBarIcon.colored
                 }
                 // popover open: the head lights up, waves stay neutral
                 if store.popoverOpen {
-                    return hasInboxArticles ? MenuBarIcon.headColoredDown : MenuBarIcon.headColored
+                    return lookDown ? MenuBarIcon.headColoredDown : MenuBarIcon.headColored
                 }
+            } else if store.popoverOpen {
+                return lookDown ? MenuBarIcon.templateDown : MenuBarIcon.template
             }
-            return hasInboxArticles ? MenuBarIcon.templateDown : MenuBarIcon.template
+            return MenuBarIcon.template
         }()
         Image(nsImage: icon)
     }
