@@ -57,9 +57,12 @@ struct BookmarkRow: View {
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 5) {
+                    SourceMark(
+                        host: store.sourceHost(title: bookmark.sourceTitle),
+                        color: store.sourceColor(title: bookmark.sourceTitle)
+                    )
                     Text(bookmark.sourceTitle)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(store.sourceColor(title: bookmark.sourceTitle))
+                        .fontWeight(.medium)
                     Text("·")
                     Text("saved \(bookmark.bookmarkedAt.articleDisplay)")
                 }

@@ -212,6 +212,12 @@ final class AppStore: ObservableObject {
         return SourcePalette.color(at: SourcePalette.autoIndex(forString: title))
     }
 
+    /// Host of the feed a source label belongs to, for favicon lookup.
+    func sourceHost(feedID: UUID? = nil, title: String) -> String? {
+        (feeds.first(where: { $0.id == feedID })
+            ?? feeds.first(where: { $0.title == title }))?.url.host
+    }
+
     func setFeedColor(_ feed: Feed, to index: Int?) {
         guard let idx = feeds.firstIndex(where: { $0.id == feed.id }) else { return }
         feeds[idx].colorIndex = index

@@ -281,9 +281,12 @@ struct ArticleRow: View {
 
                 if !compact {
                 HStack(spacing: 5) {
+                    SourceMark(
+                        host: store.sourceHost(feedID: article.feedID, title: article.sourceTitle),
+                        color: store.sourceColor(feedID: article.feedID, title: article.sourceTitle)
+                    )
                     Text(article.sourceTitle)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(store.sourceColor(feedID: article.feedID, title: article.sourceTitle))
+                        .fontWeight(.medium)
                     Text("·")
                     Text(article.published.articleDisplay)
                     if summaryTooltip != nil {

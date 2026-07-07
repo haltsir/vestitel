@@ -121,9 +121,12 @@ struct ArchiveRow: View {
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 5) {
+                    SourceMark(
+                        host: store.sourceHost(title: entry.sourceTitle),
+                        color: store.sourceColor(title: entry.sourceTitle)
+                    )
                     Text(entry.sourceTitle)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(store.sourceColor(title: entry.sourceTitle))
+                        .fontWeight(.medium)
                     Text("·")
                     Text("opened \(entry.openedAt.articleDisplay)")
                 }

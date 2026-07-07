@@ -343,6 +343,7 @@ struct SettingRow<Control: View>: View {
 
 struct FeedRowView: View {
     @EnvironmentObject var store: AppStore
+    @ObservedObject private var favicons = FaviconStore.shared
     let feed: Feed
     @State private var hovering = false
     @State private var editing = false
@@ -431,12 +432,24 @@ struct FeedRowView: View {
                 }
             }
         } label: {
-            Image(nsImage: SourcePalette.swatchImage(at: store.resolvedColorIndex(feed)))
+            // favicon when the site has one; coloured swatch otherwise.
+            // (Menu labels only render NSImages, at intrinsic size — so the
+            // favicon must be pre-resized, not framed.)
+            if let host = feed.url.host, let icon = favicons.menuIcon(for: host) {
+                Image(nsImage: icon)
+            } else {
+                Image(nsImage: SourcePalette.swatchImage(at: store.resolvedColorIndex(feed)))
+            }
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("Source colour")
+        .help("Source colour (used when the site has no icon)")
+        .onAppear {
+            if let host = feed.url.host {
+                FaviconStore.shared.load(host: host)
+            }
+        }
     }
 
     private func beginRename() {
