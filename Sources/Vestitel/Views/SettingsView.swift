@@ -364,11 +364,22 @@ struct FeedRowView: View {
                         .onSubmit(commitRename)
                         .onExitCommand { editing = false }  // Esc cancels
                 } else {
-                    Text(feed.title)
-                        .font(.system(size: 13, weight: .medium))
-                        .lineLimit(1)
-                        .onTapGesture(count: 2) { beginRename() }
-                        .help("Double-click to rename")
+                    HStack(spacing: 6) {
+                        Text(feed.title)
+                            .font(.system(size: 13, weight: .medium))
+                            .lineLimit(1)
+                            .onTapGesture(count: 2) { beginRename() }
+                            .help("Double-click to rename")
+                        if feed.isStore {
+                            Text("STORE")
+                                .font(.system(size: 9, weight: .bold))
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1.5)
+                                .background(Color.accentColor.opacity(0.15), in: Capsule())
+                                .foregroundStyle(Color.accentColor)
+                                .help("Store watch: new products land in the Store tab; cleared products never reappear")
+                        }
+                    }
                 }
                 Text(feed.url.absoluteString)
                     .font(.system(size: 11))

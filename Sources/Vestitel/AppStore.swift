@@ -40,12 +40,37 @@ final class AppStore: ObservableObject {
 
     // MARK: - Derived collections
 
+    /// Store-watch feeds have their own inbox; ids resolve which side of the
+    /// split an article belongs to.
+    private var storeFeedIDs: Set<UUID> {
+        Set(feeds.lazy.filter(\.isStore).map(\.id))
+    }
+
+    var hasStoreFeeds: Bool {
+        feeds.contains(where: \.isStore)
+    }
+
     var inbox: [Article] {
-        articles.filter { $0.state == .inbox }.sorted { $0.published > $1.published }
+        let storeIDs = storeFeedIDs
+        return articles.filter { $0.state == .inbox && !storeIDs.contains($0.feedID) }
+            .sorted { $0.published > $1.published }
+    }
+
+    /// New products from store-watch feeds — the separate Store tab inbox.
+    var storeInbox: [Article] {
+        let storeIDs = storeFeedIDs
+        return articles.filter { $0.state == .inbox && storeIDs.contains($0.feedID) }
+            .sorted { $0.published > $1.published }
     }
 
     var unreadCount: Int {
-        articles.lazy.filter { $0.state == .inbox && !$0.isRead }.count
+        let storeIDs = storeFeedIDs
+        return articles.lazy.filter { $0.state == .inbox && !$0.isRead && !storeIDs.contains($0.feedID) }.count
+    }
+
+    var storeUnreadCount: Int {
+        let storeIDs = storeFeedIDs
+        return articles.lazy.filter { $0.state == .inbox && !$0.isRead && storeIDs.contains($0.feedID) }.count
     }
 
     var cleared: [Article] {
@@ -125,8 +150,17 @@ final class AppStore: ObservableObject {
         }
         do {
             let (data, _) = try await session.data(from: url)
-            let parsed = try FeedParser.parse(data: data)
-            var feed = Feed(url: url, title: parsed.title.isEmpty ? (url.host ?? raw) : parsed.title)
+            let parsed: ParsedFeed
+            var kind = FeedKind.rss
+            if let rss = try? FeedParser.parse(data: data) {
+                parsed = rss
+            } else if let store = try? StorePageParser.parse(data: data, pageURL: url) {
+                parsed = store
+                kind = .store
+            } else {
+                return "The URL did not return a recognizable RSS/Atom feed or store listing page."
+            }
+            var feed = Feed(url: url, title: parsed.title.isEmpty ? (url.host ?? raw) : parsed.title, kind: kind)
             feed.lastFetched = Date()
             feeds.append(feed)
             if ingest(parsed.items, into: feed) > 0 {
@@ -140,10 +174,12 @@ final class AppStore: ObservableObject {
         }
     }
 
-    /// True if the URL fetches and parses as an RSS/Atom feed.
+    /// True if the URL fetches and parses as an RSS/Atom feed or a store
+    /// listing page — anything addFeed would accept.
     func isFeed(url: URL) async -> Bool {
         guard let (data, _) = try? await session.data(from: url) else { return false }
-        return (try? FeedParser.parse(data: data)) != nil
+        if (try? FeedParser.parse(data: data)) != nil { return true }
+        return (try? StorePageParser.parse(data: data, pageURL: url)) != nil
     }
 
     // MARK: - Source colours
@@ -269,7 +305,10 @@ final class AppStore: ObservableObject {
                 group.addTask { [session] in
                     do {
                         let (data, _) = try await session.data(from: feed.url)
-                        return (feed.id, .success(try FeedParser.parse(data: data)))
+                        let parsed = feed.isStore
+                            ? try StorePageParser.parse(data: data, pageURL: feed.url)
+                            : try FeedParser.parse(data: data)
+                        return (feed.id, .success(parsed))
                     } catch {
                         return (feed.id, .failure(error))
                     }
@@ -313,7 +352,10 @@ final class AppStore: ObservableObject {
     private func ingest(_ items: [ParsedItem], into feed: Feed) -> Int {
         let now = Date()
         var added = 0
-        for item in items.prefix(settings.maxArticlesPerFeed) {
+        // Store listings aren't capped: the page itself bounds the count, and
+        // truncating would silently drop products from the watch.
+        let cap = feed.isStore ? items.count : settings.maxArticlesPerFeed
+        for item in items.prefix(cap) {
             let key = item.guid ?? item.link?.absoluteString ?? item.title
             let id = "\(feed.url.absoluteString)#\(key)"
             guard seen[id] == nil else { continue }
@@ -453,7 +495,18 @@ final class AppStore: ObservableObject {
 
     func clearInbox() {
         let now = Date()
-        for i in articles.indices where articles[i].state == .inbox {
+        let storeIDs = storeFeedIDs
+        for i in articles.indices where articles[i].state == .inbox && !storeIDs.contains(articles[i].feedID) {
+            articles[i].state = .cleared
+            articles[i].clearedAt = now
+        }
+        save()
+    }
+
+    func clearStoreInbox() {
+        let now = Date()
+        let storeIDs = storeFeedIDs
+        for i in articles.indices where articles[i].state == .inbox && storeIDs.contains(articles[i].feedID) {
             articles[i].state = .cleared
             articles[i].clearedAt = now
         }
@@ -495,8 +548,15 @@ final class AppStore: ObservableObject {
         }
         if articles.count != purgeCount { changed = true }
 
+        // Store-watch ids are exempt from seen pruning: a cleared product
+        // must never re-ingest, no matter how long it stays in the listing.
+        // (Article ids are "<feed url>#<key>", so a prefix match suffices.)
+        let storeKeyPrefixes = feeds.filter(\.isStore).map { $0.url.absoluteString + "#" }
         let seenCount = seen.count
-        seen = seen.filter { now.timeIntervalSince($0.value) < AppSettings.seenRetention }
+        seen = seen.filter { entry in
+            now.timeIntervalSince(entry.value) < AppSettings.seenRetention
+                || storeKeyPrefixes.contains(where: entry.key.hasPrefix)
+        }
         if seen.count != seenCount { changed = true }
 
         if changed { save() }
@@ -514,7 +574,7 @@ final class AppStore: ObservableObject {
     func exportSettings() -> Data? {
         let doc = SettingsExport(
             settings: settings,
-            feeds: feeds.map { .init(url: $0.url, title: $0.title, colorIndex: $0.colorIndex) }
+            feeds: feeds.map { .init(url: $0.url, title: $0.title, colorIndex: $0.colorIndex, kind: $0.kind) }
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -532,7 +592,7 @@ final class AppStore: ObservableObject {
         settings = doc.settings
         var added = 0
         for exported in doc.feeds where !feeds.contains(where: { $0.url == exported.url }) {
-            feeds.append(Feed(url: exported.url, title: exported.title, colorIndex: exported.colorIndex))
+            feeds.append(Feed(url: exported.url, title: exported.title, colorIndex: exported.colorIndex, kind: exported.kind))
             added += 1
         }
         save()

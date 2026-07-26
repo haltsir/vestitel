@@ -2,6 +2,14 @@ import Foundation
 
 // MARK: - Feed
 
+enum FeedKind: String, Codable {
+    case rss
+    /// A store product-listing page watched for new products (ozone.bg-style
+    /// category pages). Products land in the separate Store inbox, and their
+    /// `seen` entries are kept forever so a cleared product never reappears.
+    case store
+}
+
 struct Feed: Identifiable, Codable, Hashable {
     var id: UUID = UUID()
     var url: URL
@@ -11,6 +19,10 @@ struct Feed: Identifiable, Codable, Hashable {
     var lastError: String? = nil
     /// Index into SourcePalette; nil = automatic (derived from the URL).
     var colorIndex: Int? = nil
+    /// nil = rss (pre-store state files decode tolerantly).
+    var kind: FeedKind? = nil
+
+    var isStore: Bool { kind == .store }
 }
 
 // MARK: - Article
@@ -114,5 +126,6 @@ struct SettingsExport: Codable {
         var url: URL
         var title: String
         var colorIndex: Int? = nil
+        var kind: FeedKind? = nil
     }
 }
