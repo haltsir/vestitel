@@ -49,6 +49,9 @@ struct StoreView: View {
                     .foregroundStyle(.tertiary)
             }
             Spacer()
+            OpenAllButton(count: store.storeInbox.count) {
+                store.openAll(store.storeInbox)
+            }
             Button {
                 store.clearStoreInbox()
             } label: {

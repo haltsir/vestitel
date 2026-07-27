@@ -20,7 +20,7 @@ final class AppStore: ObservableObject {
     @Published var archive: [ArchiveEntry] = []
     @Published var bookmarks: [BookmarkEntry] = []
     @Published var settings: AppSettings = AppSettings() {
-        didSet { scheduleRefreshTimer(); save() }
+        didSet { scheduleRefreshTimer(); save(); updateSyncFolderWatcher() }
     }
     @Published var isRefreshing = false
     /// Feeds being fetched by the per-feed refresh button (row spinners).
@@ -51,6 +51,13 @@ final class AppStore: ObservableObject {
     var archiveClearedAt: Date? = nil
     @Published var syncStatus: String? = nil
     var syncInFlight = false
+    /// A sync trigger arrived while one was running — run once more after.
+    var syncQueued = false
+    /// FSEvents watcher on the sync folder (see SyncEngine.swift).
+    var syncWatcher: SyncFolderWatcher? = nil
+    /// Path the current watcher observes, so settings.didSet (which fires on
+    /// every settings mutation) only rebuilds it when the path changes.
+    var watchedSyncFolderPath: String? = nil
     /// Feeds we've already notified about being bot-blocked: one
     /// notification per block episode, cleared on the next successful fetch.
     private var notifiedBlockedFeeds: Set<UUID> = []
@@ -475,7 +482,8 @@ final class AppStore: ObservableObject {
     }
 
     /// Play the menu bar wiggle for ~2.5 s (two loops of the frame cycle).
-    private func animateMenuBarIcon() {
+    /// (internal, not private: SyncEngine plays it when a merge brings news)
+    func animateMenuBarIcon() {
         iconAnimationTimer?.invalidate()
         var tick = 0
         let total = MenuBarIcon.frameCount * 2
@@ -504,6 +512,30 @@ final class AppStore: ObservableObject {
         }
         recordInArchive(id: article.id, title: article.title, link: article.link, sourceTitle: article.sourceTitle)
         mutate(article) { if $0.readAt == nil { $0.readAt = Date() } }
+        save()
+    }
+
+    /// Open every article in the list at once — single save at the end
+    /// instead of per-item (a full store inbox would write state 100×).
+    func openAll(_ list: [Article]) {
+        let now = Date()
+        for article in list {
+            if let url = article.link {
+                NSWorkspace.shared.open(url)
+            }
+            recordInArchive(id: article.id, title: article.title, link: article.link, sourceTitle: article.sourceTitle)
+            mutate(article) { if $0.readAt == nil { $0.readAt = now } }
+        }
+        save()
+    }
+
+    func openAllBookmarks() {
+        for bookmark in bookmarks {
+            if let url = bookmark.link {
+                NSWorkspace.shared.open(url)
+            }
+            recordInArchive(id: bookmark.id, title: bookmark.title, link: bookmark.link, sourceTitle: bookmark.sourceTitle)
+        }
         save()
     }
 

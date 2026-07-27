@@ -134,6 +134,53 @@ struct HeaderButton: View {
     }
 }
 
+/// Footer button that opens every item of the current list in the browser.
+/// Asks first when that means more than 20 tabs. The confirmation is inline
+/// (the button swaps into a question) — a system dialog would be a second
+/// window, and the menu bar popover closes on any focus change.
+struct OpenAllButton: View {
+    let count: Int
+    let action: () -> Void
+    @State private var confirming = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if confirming {
+                Text("Open \(count) tabs?")
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Button("Open") {
+                    confirming = false
+                    action()
+                }
+                .buttonStyle(HoverButtonStyle(prominent: true))
+                .help("Open all \(count) items in your browser")
+                Button("Cancel") {
+                    confirming = false
+                }
+                .buttonStyle(HoverButtonStyle())
+                .help("Don't open anything")
+            } else {
+                Button {
+                    if count > 20 {
+                        confirming = true
+                    } else {
+                        action()
+                    }
+                } label: {
+                    Label("Open All", systemImage: "arrow.up.forward.app")
+                }
+                .buttonStyle(HoverButtonStyle())
+                .disabled(count == 0)
+                .help("Open every item in this list in your browser")
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: confirming)
+        // popover closed or tab switched: never keep a stale question
+        .onDisappear { confirming = false }
+    }
+}
+
 // MARK: - Shared row
 
 struct ArticleRow: View {

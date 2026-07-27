@@ -1,4 +1,5 @@
 import Foundation
+import CoreServices
 
 /// One machine's contribution to the shared sync folder. Every machine
 /// writes exactly one file (vestitel-<machineID>.json) and merges everyone
@@ -39,11 +40,24 @@ extension AppStore {
 
     /// Read every other machine's document and merge it, then write our own.
     /// Reentrancy-guarded; reading happens off the main actor because cloud
-    /// placeholder files can block on download.
+    /// placeholder files can block on download. A trigger that lands mid-sync
+    /// (the folder watcher fires while a placeholder download blocks the
+    /// read) queues one follow-up pass instead of being dropped.
     func syncNow() async {
-        guard let folder = syncFolderURL, !syncInFlight else { return }
+        guard let folder = syncFolderURL else { return }
+        if syncInFlight {
+            syncQueued = true
+            return
+        }
         syncInFlight = true
-        defer { syncInFlight = false }
+        defer {
+            syncInFlight = false
+            if syncQueued {
+                syncQueued = false
+                Task { await self.syncNow() }
+            }
+        }
+        let unreadBefore = unreadCount + storeUnreadCount
 
         let ownFile = ownSyncFileName
         let docs: [SyncDocument]? = await Task.detached(priority: .utility) {
@@ -75,6 +89,13 @@ extension AppStore {
         } else {
             writeSyncDocument()
         }
+        // A merge that brought new articles gets the same signals as a fetch
+        // that did — unless the popover is open and the user is looking.
+        if !popoverOpen, unreadCount + storeUnreadCount > unreadBefore {
+            hasUnseenArticles = true
+            animateMenuBarIcon()
+            _ = groupedInbox   // warm the grouping cache off the render path
+        }
         let time = Date().formatted(date: .omitted, time: .shortened)
         syncStatus = docs.isEmpty
             ? "No other Macs found yet · checked \(time)"
@@ -104,6 +125,20 @@ extension AppStore {
             lastSyncPayload = payload
         } catch {
             syncStatus = "Couldn't write to the sync folder."
+        }
+    }
+
+    /// (Re)start the folder watcher after a sync-folder change. Called from
+    /// settings.didSet, which fires on every settings mutation — hence the
+    /// no-op guard on the watched path.
+    func updateSyncFolderWatcher() {
+        guard syncFolderURL?.path != watchedSyncFolderPath else { return }
+        watchedSyncFolderPath = syncFolderURL?.path
+        syncWatcher = nil
+        guard let folder = syncFolderURL else { return }
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        syncWatcher = SyncFolderWatcher(folder: folder, ownFileName: ownSyncFileName) { [weak self] in
+            Task { @MainActor in await self?.syncNow() }
         }
     }
 
@@ -249,5 +284,70 @@ extension AppStore {
         }
 
         return changed
+    }
+}
+
+/// FSEvents watcher on the sync folder: fires when the cloud client delivers
+/// another machine's document, so merges happen seconds after propagation
+/// instead of at the next refresh or popover open. FSEvents (not a kqueue
+/// DispatchSource on the directory) because cloud clients may rewrite a file
+/// in place, which a directory-level kqueue watch never sees.
+final class SyncFolderWatcher {
+    private var stream: FSEventStreamRef?
+    private let folderPath: String
+    private let ownFileName: String
+    private let onChange: () -> Void
+
+    init?(folder: URL, ownFileName: String, onChange: @escaping () -> Void) {
+        self.folderPath = (folder.path as NSString).standardizingPath
+        self.ownFileName = ownFileName
+        self.onChange = onChange
+
+        var context = FSEventStreamContext(
+            version: 0,
+            info: Unmanaged.passUnretained(self).toOpaque(),
+            retain: nil, release: nil, copyDescription: nil
+        )
+        let callback: FSEventStreamCallback = { _, info, _, eventPaths, _, _ in
+            guard let info else { return }
+            let watcher = Unmanaged<SyncFolderWatcher>.fromOpaque(info).takeUnretainedValue()
+            let paths = Unmanaged<NSArray>.fromOpaque(eventPaths).takeUnretainedValue() as? [String] ?? []
+            watcher.handle(paths: paths)
+        }
+        guard let stream = FSEventStreamCreate(
+            nil, callback, &context,
+            [folder.path] as CFArray,
+            FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+            2.0,   // coalescing latency: cloud clients write in bursts
+            FSEventStreamCreateFlags(
+                kFSEventStreamCreateFlagUseCFTypes
+                    | kFSEventStreamCreateFlagFileEvents
+                    | kFSEventStreamCreateFlagIgnoreSelf   // our own writes don't re-trigger
+            )
+        ) else { return nil }
+        self.stream = stream
+        FSEventStreamSetDispatchQueue(stream, .main)
+        FSEventStreamStart(stream)
+    }
+
+    private func handle(paths: [String]) {
+        let relevant = paths.contains { path in
+            let name = (path as NSString).lastPathComponent
+            if name.hasPrefix("vestitel-") && name.hasSuffix(".json") {
+                return name != ownFileName
+            }
+            // An event-queue overflow reports the folder itself with
+            // "must scan subdirs" — treat it as "something may have changed".
+            return (path as NSString).standardizingPath == folderPath
+        }
+        if relevant { onChange() }
+    }
+
+    deinit {
+        if let stream {
+            FSEventStreamStop(stream)
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+        }
     }
 }

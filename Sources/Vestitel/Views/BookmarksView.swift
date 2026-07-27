@@ -10,6 +10,9 @@ struct BookmarksView: View {
                     .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
                 Spacer()
+                OpenAllButton(count: store.bookmarks.count) {
+                    store.openAllBookmarks()
+                }
             }
             .padding(.horizontal, 14)
             .frame(height: 40)
