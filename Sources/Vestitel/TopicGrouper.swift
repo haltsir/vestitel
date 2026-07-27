@@ -11,7 +11,11 @@ import NaturalLanguage
 /// Linked pairs are merged with union-find.
 enum TopicGrouper {
 
+    /// Words too generic to link two stories (words under 3 characters are
+    /// dropped before this check, so short glue like "за"/"на"/"of" never
+    /// reaches it). English + Bulgarian.
     private static let stopwords: Set<String> = [
+        // English: function words
         "the", "and", "for", "with", "that", "this", "from", "have", "has",
         "was", "are", "will", "you", "your", "its", "his", "her", "their",
         "but", "not", "all", "can", "how", "why", "what", "when", "who",
@@ -19,6 +23,75 @@ enum TopicGrouper {
         "more", "than", "just", "now", "get", "gets", "here", "there",
         "one", "two", "amid", "may", "could", "would", "should", "been",
         "off", "our", "were", "via", "per", "top", "big",
+        "also", "some", "any", "other", "others", "another", "only", "even",
+        "ever", "never", "must", "might", "being", "does", "did", "doing",
+        "done", "had", "having", "because", "while", "where", "which",
+        "whose", "them", "they", "then", "these", "those", "still", "back",
+        "again", "against", "during", "between", "around", "through",
+        "under", "without", "within", "among", "before", "behind",
+        "despite", "due", "since", "until", "toward", "towards", "onto",
+        "very", "much", "many", "few", "own", "several", "first", "last",
+        "next", "best", "worst", "most", "least", "old", "major",
+        "everything", "anything", "nothing", "something", "everyone",
+        "anyone", "someone",
+        // English: generic verbs
+        "make", "makes", "made", "making", "take", "takes", "took", "taken",
+        "see", "seen", "look", "looks", "say", "saying", "tell", "tells",
+        "told", "show", "shows", "showed", "shown", "announced",
+        "announces", "reveals", "revealed",
+        // English: news-rubric and quantity noise
+        "video", "videos", "photo", "photos", "watch", "live", "news",
+        "breaking", "report", "reports", "reported", "latest", "update",
+        "updates", "updated", "exclusive", "opinion", "analysis",
+        "explained", "million", "billion", "millions", "billions", "percent",
+        "year", "years", "day", "days", "week", "weeks", "month", "months",
+        "today", "tomorrow", "yesterday", "tonight", "people", "man",
+        "woman", "men", "women", "way", "ways", "thing", "things",
+        "january", "february", "march", "april", "june", "july", "august",
+        "september", "october", "november", "december",
+        "including", "dozens", "hundreds", "thousands", "together",
+        // Bulgarian: prepositions and conjunctions
+        "без", "във", "със", "като", "ако", "или", "нито", "обаче",
+        "затова", "защото", "защо", "докато", "след", "преди", "между",
+        "върху", "около", "срещу", "заради", "против", "чрез", "освен",
+        "според", "въпреки", "относно", "покрай", "тъй", "пък", "ето",
+        "най", "през", "включително",
+        // Bulgarian: pronouns and demonstratives
+        "това", "тази", "този", "тези", "онзи", "онази", "онова", "онези",
+        "какво", "каква", "какви", "какъв", "кой", "коя", "кое", "кои",
+        "кого", "който", "която", "което", "които", "всичко", "всички",
+        "всеки", "всяка", "всяко", "него", "нея", "тях", "нас", "вас",
+        "ние", "вие", "той", "нещо", "някой", "някоя", "някои", "нищо",
+        "никой", "сам", "сама", "само", "себе", "свой", "своя", "свои",
+        // Bulgarian: adverbs
+        "още", "вече", "също", "дори", "пак", "там", "тук", "къде",
+        "кога", "как", "така", "тогава", "сега", "днес", "утре", "вчера",
+        "снощи", "много", "малко", "повече", "почти", "живо",
+        // Bulgarian: generic verbs
+        "има", "имат", "няма", "нямат", "беше", "бяха", "бъде", "бъдат",
+        "били", "било", "била", "бил", "съм", "сме", "сте", "иска",
+        "искат", "може", "могат", "можем", "трябва", "трябвало", "става",
+        "стават", "стана", "станала", "станало", "станаха", "случва",
+        "случват", "случи", "случило", "прави", "правят", "направи",
+        "каза", "казва", "казват", "казаха", "заяви", "заявиха", "съобщи",
+        "съобщиха", "съобщава", "обяви", "обявиха", "обявява", "разкри",
+        "разкриха", "разкрива", "показа", "показва", "показват",
+        "показаха", "дойде", "идва", "идват", "вижте", "гледайте",
+        "очаква", "очакват", "излезе", "излиза", "дава", "дават", "даде",
+        "получи", "получава",
+        // Bulgarian: news-rubric and quantity noise
+        "видео", "снимки", "снимка", "новини", "новина", "нови", "новият",
+        "новия", "новите", "нова", "ново", "млн", "млрд", "хил",
+        "души", "човек", "хора",
+        "жена", "жени", "мъж", "мъже", "година", "години", "годишен",
+        "годишна", "ден", "дни", "седмица", "седмици", "месец", "месеца",
+        "месеци", "час", "часа", "часът", "минути", "процент", "процента",
+        "хиляди", "милиона", "милиони", "милиарда", "милиарди", "брой",
+        "част", "път", "пъти", "коментар", "анализ", "мнение", "интервю",
+        "официално", "десетки", "стотици", "заедно",
+        // Bulgarian: months
+        "януари", "февруари", "март", "април", "май", "юни", "юли",
+        "август", "септември", "октомври", "ноември", "декември",
     ]
 
     private static let embedding: NLEmbedding? = NLEmbedding.sentenceEmbedding(for: .english)
@@ -36,17 +109,51 @@ enum TopicGrouper {
         return v
     }
 
+    /// Quote pairs whose content becomes a single token: Bulgarian „…“,
+    /// curly “…”, guillemets «…», straight "…". (No apostrophes — they'd
+    /// swallow contractions.)
+    private static let quotePairs: [(open: String, close: String)] = [
+        ("„", "“"), ("“", "”"), ("«", "»"), ("\u{22}", "\u{22}"),
+    ]
+
     static func tokens(_ title: String) -> Set<String> {
-        let lowered = title.lowercased()
         var result: Set<String> = []
-        lowered.unicodeScalars.split(whereSeparator: { !CharacterSet.alphanumerics.contains($0) })
-            .forEach { chunk in
-                let word = String(String.UnicodeScalarView(chunk))
-                if word.count >= 3, !stopwords.contains(word), Int(word) == nil {
-                    result.insert(word)
+        var remainder = title.lowercased()
+
+        // Quoted text is one keyword: „Има такъв народ“ should link titles
+        // quoting the same name, not leak its individual (often generic)
+        // words into the keyword set.
+        for (open, close) in quotePairs {
+            while let openRange = remainder.range(of: open),
+                  let closeRange = remainder.range(
+                    of: close, range: openRange.upperBound..<remainder.endIndex) {
+                let words = words(in: remainder[openRange.upperBound..<closeRange.lowerBound])
+                remainder.removeSubrange(openRange.lowerBound..<closeRange.upperBound)
+                if words.count > 1 {
+                    let phrase = words.joined(separator: " ")
+                    if phrase.count >= 3 { result.insert(phrase) }
+                } else if let word = words.first {
+                    insertWord(word, into: &result)
                 }
             }
+        }
+
+        for word in words(in: remainder[...]) {
+            insertWord(word, into: &result)
+        }
         return result
+    }
+
+    private static func words(in text: Substring) -> [String] {
+        text.unicodeScalars
+            .split(whereSeparator: { !CharacterSet.alphanumerics.contains($0) })
+            .map { String(String.UnicodeScalarView($0)) }
+    }
+
+    private static func insertWord(_ word: String, into result: inout Set<String>) {
+        if word.count >= 3, !stopwords.contains(word), Int(word) == nil {
+            result.insert(word)
+        }
     }
 
     static func group(_ articles: [Article], sensitivity: Double) -> [TopicGroup] {
@@ -84,14 +191,17 @@ enum TopicGrouper {
 
                 let unionCount = tokenSets[i].union(tokenSets[j]).count
                 let jaccard = unionCount == 0 ? 0 : Double(shared.count) / Double(unionCount)
-                if jaccard >= jaccardThreshold || shared.count >= 3 {
+                // A shared quoted phrase (multi-word token) is a much
+                // stronger signal than a shared word: count it double.
+                let sharedWeight = shared.count + shared.lazy.filter { $0.contains(" ") }.count
+                if jaccard >= jaccardThreshold || sharedWeight >= 3 {
                     union(i, j)
                     continue
                 }
                 // Embedding link needs ≥2 shared tokens — one generic shared
                 // word ("fixing", "review") plus loose semantic similarity is
                 // not the same story.
-                if shared.count >= 2, let va = vectors[i], let vb = vectors[j] {
+                if sharedWeight >= 2, let va = vectors[i], let vb = vectors[j] {
                     if cosineDistance(va, vb) <= distanceThreshold {
                         union(i, j)
                     }
@@ -157,9 +267,19 @@ enum TopicGrouper {
         var display: [String] = []
         for token in common {
             var found: String? = nil
-            outer: for title in titles {
-                for word in title.split(whereSeparator: { !$0.isLetter && !$0.isNumber }) {
-                    if word.lowercased() == token { found = String(word); break outer }
+            if token.contains(" ") {
+                // quoted-phrase token: find it verbatim in some title
+                for title in titles {
+                    if let range = title.range(of: token, options: .caseInsensitive) {
+                        found = String(title[range])
+                        break
+                    }
+                }
+            } else {
+                outer: for title in titles {
+                    for word in title.split(whereSeparator: { !$0.isLetter && !$0.isNumber }) {
+                        if word.lowercased() == token { found = String(word); break outer }
+                    }
                 }
             }
             display.append(found ?? token.capitalized)
