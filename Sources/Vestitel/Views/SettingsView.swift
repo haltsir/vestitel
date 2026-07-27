@@ -21,6 +21,8 @@ struct SettingsView: View {
                 Divider()
                 behaviorSection
                 Divider()
+                syncSection
+                Divider()
                 importExportSection
             }
             .padding(14)
@@ -234,6 +236,90 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: Sync between Macs
+
+    private var syncSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("Sync Between Macs")
+
+            if let path = store.settings.syncFolderPath {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(path)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(path)
+                    if let status = store.syncStatus {
+                        Text(status)
+                            .font(.system(size: 11))
+                            .foregroundStyle(status.hasPrefix("Merged") || status.hasPrefix("No other")
+                                ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.red))
+                    }
+                }
+                HStack(spacing: 10) {
+                    Button {
+                        Task { await store.syncNow() }
+                    } label: {
+                        Label("Sync Now", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    Button {
+                        chooseSyncFolder()
+                    } label: {
+                        Label("Change Folder…", systemImage: "folder")
+                    }
+                    Button {
+                        store.deleteSyncDocument()
+                        store.settings.syncFolderPath = nil
+                        store.syncStatus = nil
+                    } label: {
+                        Label("Turn Off", systemImage: "xmark.circle")
+                    }
+                }
+                .buttonStyle(HoverButtonStyle())
+            } else {
+                Button {
+                    chooseSyncFolder()
+                } label: {
+                    Label("Choose Sync Folder…", systemImage: "folder.badge.plus")
+                }
+                .buttonStyle(HoverButtonStyle())
+            }
+
+            Text("Pick a cloud-synced folder (e.g. inside Google Drive) and choose the same folder on every Mac. Feeds, read/cleared state, bookmarks and the never-show-again list merge automatically; each Mac writes only its own file, so there are no conflicts. Preferences stay per-Mac.")
+                .font(.system(size: 11.5))
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private func chooseSyncFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.prompt = "Use This Folder"
+        panel.message = "Choose a synced folder — pick the same one on every Mac."
+        if store.settings.syncFolderPath == nil, let root = defaultCloudRoot {
+            panel.directoryURL = root
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            store.settings.syncFolderPath = url.path
+            Task { await store.syncNow() }
+        }
+    }
+
+    /// Google Drive's mount if present (the panel's starting point).
+    private var defaultCloudRoot: URL? {
+        let cloudStorage = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/CloudStorage")
+        guard let mounts = try? FileManager.default.contentsOfDirectory(
+            at: cloudStorage, includingPropertiesForKeys: nil) else { return nil }
+        return mounts.first { $0.lastPathComponent.hasPrefix("GoogleDrive-") }?
+            .appendingPathComponent("My Drive")
+    }
+
     // MARK: Import / export
 
     private var importExportSection: some View {
@@ -393,6 +479,20 @@ struct FeedRowView: View {
                 }
             }
             Spacer()
+            if store.refreshingFeedIDs.contains(feed.id) {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 26, height: 26)
+            } else {
+                // always offered on a failing feed, so retry is discoverable
+                RowActionButton(
+                    icon: "arrow.clockwise",
+                    help: "Fetch this feed now",
+                    visible: (hovering || feed.lastError != nil) && !editing
+                ) {
+                    Task { await store.refreshFeed(feed) }
+                }
+            }
             if editing {
                 RowActionButton(icon: "checkmark", tint: .green, help: "Save name") {
                     commitRename()

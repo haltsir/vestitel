@@ -3,6 +3,15 @@ import AppKit
 import Combine
 import SwiftUI
 
+/// A feed request answered with a bot-protection page (Cloudflare challenge
+/// etc.) instead of feed content.
+struct FeedBlockedError: Error, LocalizedError {
+    let host: String
+    var errorDescription: String? {
+        "\(host) is blocking automated feed readers — a browser check is required."
+    }
+}
+
 @MainActor
 final class AppStore: ObservableObject {
 
@@ -14,6 +23,8 @@ final class AppStore: ObservableObject {
         didSet { scheduleRefreshTimer(); save() }
     }
     @Published var isRefreshing = false
+    /// Feeds being fetched by the per-feed refresh button (row spinners).
+    @Published var refreshingFeedIDs: Set<UUID> = []
     @Published var lastRefresh: Date? = nil
     /// Non-nil while the menu bar icon plays its new-articles animation.
     @Published var iconAnimationFrame: Int? = nil
@@ -27,7 +38,24 @@ final class AppStore: ObservableObject {
 
     /// Every article id we've ever ingested, with first-seen date, so purged
     /// articles don't reappear on the next fetch. Pruned after 30 days.
-    private var seen: [String: Date] = [:]
+    /// (internal, not private: SyncEngine merges into it)
+    var seen: [String: Date] = [:]
+
+    // MARK: Sync state (see SyncEngine.swift)
+
+    /// Stable identity of this machine in the sync folder.
+    var machineID: String = UUID().uuidString
+    /// Deletion tombstones so merges can't resurrect removed records.
+    var removedFeeds: [String: Date] = [:]       // feed URL -> removedAt
+    var removedBookmarks: [String: Date] = [:]   // article id -> removedAt
+    var archiveClearedAt: Date? = nil
+    @Published var syncStatus: String? = nil
+    var syncInFlight = false
+    /// Feeds we've already notified about being bot-blocked: one
+    /// notification per block episode, cleared on the next successful fetch.
+    private var notifiedBlockedFeeds: Set<UUID> = []
+    /// Last written sync payload (updatedAt zeroed) — skip no-op writes.
+    var lastSyncPayload: Data? = nil
 
     private var sweepTimer: Timer?
     private var refreshTimer: Timer?
@@ -119,13 +147,19 @@ final class AppStore: ObservableObject {
     // MARK: - Lifecycle
 
     init() {
+        NotificationManager.shared.setup()
         load()
         sweep()
         sweepTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.sweep() }
         }
         scheduleRefreshTimer()
-        Task { await refreshAll() }
+        // Sync before the first refresh so a fresh machine adopts feeds from
+        // the folder; refreshAll ends with another sync to push new articles.
+        Task {
+            await syncNow()
+            await refreshAll()
+        }
     }
 
     private func scheduleRefreshTimer() {
@@ -149,7 +183,7 @@ final class AppStore: ObservableObject {
             return "That feed is already added."
         }
         do {
-            let (data, _) = try await session.data(from: url)
+            let (data, response) = try await session.data(from: url)
             let parsed: ParsedFeed
             var kind = FeedKind.rss
             if let rss = try? FeedParser.parse(data: data) {
@@ -157,12 +191,15 @@ final class AppStore: ObservableObject {
             } else if let store = try? StorePageParser.parse(data: data, pageURL: url) {
                 parsed = store
                 kind = .store
+            } else if Self.looksBlocked(response: response, data: data) {
+                return FeedBlockedError(host: url.host ?? "The site").localizedDescription
             } else {
                 return "The URL did not return a recognizable RSS/Atom feed or store listing page."
             }
             var feed = Feed(url: url, title: parsed.title.isEmpty ? (url.host ?? raw) : parsed.title, kind: kind)
             feed.lastFetched = Date()
             feeds.append(feed)
+            removedFeeds[url.absoluteString] = nil  // re-adding beats any old tombstone
             if ingest(parsed.items, into: feed) > 0 {
                 hasUnseenArticles = true
                 animateMenuBarIcon()
@@ -285,10 +322,59 @@ final class AppStore: ObservableObject {
     func removeFeed(_ feed: Feed) {
         feeds.removeAll { $0.id == feed.id }
         articles.removeAll { $0.feedID == feed.id && $0.state == .inbox && !$0.isRead }
+        removedFeeds[feed.url.absoluteString] = Date()
         save()
     }
 
     // MARK: - Refresh
+
+    /// Fetch and parse one feed; never touches state (safe off-main).
+    nonisolated private func fetchParsed(for feed: Feed) async -> Result<ParsedFeed, Error> {
+        do {
+            let (data, response) = try await session.data(from: feed.url)
+            do {
+                let parsed = feed.isStore
+                    ? try StorePageParser.parse(data: data, pageURL: feed.url)
+                    : try FeedParser.parse(data: data)
+                return .success(parsed)
+            } catch {
+                if Self.looksBlocked(response: response, data: data) {
+                    return .failure(FeedBlockedError(host: feed.url.host ?? "The site"))
+                }
+                return .failure(error)
+            }
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    /// Record a fetch result on the feed (lastFetched/lastError, blocked
+    /// notification) and ingest its items. Returns how many were new.
+    private func applyFetchResult(_ result: Result<ParsedFeed, Error>, to feedID: UUID) -> Int {
+        guard let idx = feeds.firstIndex(where: { $0.id == feedID }) else { return 0 }
+        switch result {
+        case .success(let parsed):
+            feeds[idx].lastFetched = Date()
+            feeds[idx].lastError = nil
+            notifiedBlockedFeeds.remove(feedID)
+            if feeds[idx].title.isEmpty, !parsed.title.isEmpty {
+                feeds[idx].title = parsed.title
+            }
+            return ingest(parsed.items, into: feeds[idx])
+        case .failure(let error):
+            feeds[idx].lastError = error.localizedDescription
+            if error is FeedBlockedError, !notifiedBlockedFeeds.contains(feedID) {
+                notifiedBlockedFeeds.insert(feedID)
+                let host = feeds[idx].url.host ?? ""
+                NotificationManager.shared.notifyFeedBlocked(
+                    feedTitle: feeds[idx].title,
+                    host: host,
+                    siteURL: URL(string: "https://\(host)") ?? feeds[idx].url
+                )
+            }
+            return 0
+        }
+    }
 
     func refreshAll() async {
         guard !isRefreshing, !feeds.isEmpty else { return }
@@ -302,31 +388,12 @@ final class AppStore: ObservableObject {
         var newCount = 0
         await withTaskGroup(of: (UUID, Result<ParsedFeed, Error>).self) { group in
             for feed in feeds {
-                group.addTask { [session] in
-                    do {
-                        let (data, _) = try await session.data(from: feed.url)
-                        let parsed = feed.isStore
-                            ? try StorePageParser.parse(data: data, pageURL: feed.url)
-                            : try FeedParser.parse(data: data)
-                        return (feed.id, .success(parsed))
-                    } catch {
-                        return (feed.id, .failure(error))
-                    }
+                group.addTask {
+                    (feed.id, await self.fetchParsed(for: feed))
                 }
             }
             for await (feedID, result) in group {
-                guard let idx = feeds.firstIndex(where: { $0.id == feedID }) else { continue }
-                switch result {
-                case .success(let parsed):
-                    feeds[idx].lastFetched = Date()
-                    feeds[idx].lastError = nil
-                    if feeds[idx].title.isEmpty, !parsed.title.isEmpty {
-                        feeds[idx].title = parsed.title
-                    }
-                    newCount += ingest(parsed.items, into: feeds[idx])
-                case .failure(let error):
-                    feeds[idx].lastError = error.localizedDescription
-                }
+                newCount += applyFetchResult(result, to: feedID)
             }
         }
         if newCount > 0 {
@@ -336,15 +403,46 @@ final class AppStore: ObservableObject {
             // instead of when the user next opens the inbox
             _ = groupedInbox
         }
+        await syncNow()
+    }
+
+    /// Fetch a single feed right now — the per-feed refresh button in
+    /// Settings (retry a blocked feed, pull a listing without waiting for
+    /// the timer). Same ingest semantics as a timed refresh.
+    func refreshFeed(_ feed: Feed) async {
+        guard !refreshingFeedIDs.contains(feed.id) else { return }
+        refreshingFeedIDs.insert(feed.id)
+        defer { refreshingFeedIDs.remove(feed.id) }
+
+        let result = await fetchParsed(for: feed)
+        if applyFetchResult(result, to: feed.id) > 0 {
+            hasUnseenArticles = true
+            animateMenuBarIcon()
+            _ = groupedInbox
+        }
+        save()
     }
 
     /// True while the popover is open — the menu bar icon shows its
     /// head-coloured "you're looking at me" variant.
     @Published var popoverOpen = false
 
-    /// The user opened the popover — acknowledge the new-articles indicator.
+    /// The user opened the popover — acknowledge the new-articles indicator
+    /// and pull the latest state from the other machines.
     func markSeen() {
         hasUnseenArticles = false
+        Task { await syncNow() }
+    }
+
+    /// True when a response is a bot-protection page rather than content:
+    /// an explicit Cloudflare challenge header, or a block-ish status code
+    /// carrying HTML where a feed should be.
+    nonisolated private static func looksBlocked(response: URLResponse?, data: Data) -> Bool {
+        guard let http = response as? HTTPURLResponse else { return false }
+        if http.value(forHTTPHeaderField: "cf-mitigated") != nil { return true }
+        guard [401, 403, 429, 503].contains(http.statusCode) else { return false }
+        let head = String(decoding: data.prefix(512), as: UTF8.self).lowercased()
+        return head.contains("<!doctype html") || head.contains("<html")
     }
 
     /// Returns how many articles were actually new.
@@ -427,6 +525,7 @@ final class AppStore: ObservableObject {
     func toggleBookmark(_ article: Article) {
         if let idx = bookmarks.firstIndex(where: { $0.id == article.id }) {
             bookmarks.remove(at: idx)
+            removedBookmarks[article.id] = Date()
         } else {
             bookmarks.insert(BookmarkEntry(
                 id: article.id,
@@ -435,12 +534,14 @@ final class AppStore: ObservableObject {
                 sourceTitle: article.sourceTitle,
                 bookmarkedAt: Date()
             ), at: 0)
+            removedBookmarks[article.id] = nil
         }
         save()
     }
 
     func removeBookmark(_ bookmark: BookmarkEntry) {
         bookmarks.removeAll { $0.id == bookmark.id }
+        removedBookmarks[bookmark.id] = Date()
         save()
     }
 
@@ -515,6 +616,7 @@ final class AppStore: ObservableObject {
 
     func clearArchive() {
         archive.removeAll()
+        archiveClearedAt = Date()
         save()
     }
 
@@ -609,6 +711,11 @@ final class AppStore: ObservableObject {
         var bookmarks: [BookmarkEntry]?  // optional: absent in pre-bookmarks state files
         var settings: AppSettings
         var seen: [String: Date]
+        // sync additions — all optional so older state files still decode
+        var machineID: String?
+        var removedFeeds: [String: Date]?
+        var removedBookmarks: [String: Date]?
+        var archiveClearedAt: Date?
     }
 
     private static var stateURL: URL {
@@ -621,13 +728,16 @@ final class AppStore: ObservableObject {
     func save() {
         let state = PersistedState(
             feeds: feeds, articles: articles, archive: archive,
-            bookmarks: bookmarks, settings: settings, seen: seen
+            bookmarks: bookmarks, settings: settings, seen: seen,
+            machineID: machineID, removedFeeds: removedFeeds,
+            removedBookmarks: removedBookmarks, archiveClearedAt: archiveClearedAt
         )
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         if let data = try? encoder.encode(state) {
             try? data.write(to: Self.stateURL, options: .atomic)
         }
+        writeSyncDocument()
     }
 
     private func load() {
@@ -639,7 +749,13 @@ final class AppStore: ObservableObject {
         articles = state.articles
         archive = state.archive
         bookmarks = state.bookmarks ?? []
-        settings = state.settings
         seen = state.seen
+        machineID = state.machineID ?? machineID
+        removedFeeds = state.removedFeeds ?? [:]
+        removedBookmarks = state.removedBookmarks ?? [:]
+        archiveClearedAt = state.archiveClearedAt
+        // last: its didSet fires save() → writeSyncDocument(), which must see
+        // the fully loaded state (machineID above all)
+        settings = state.settings
     }
 }
