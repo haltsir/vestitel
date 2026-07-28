@@ -30,6 +30,10 @@ enum TopicGrouper {
         "again", "against", "during", "between", "around", "through",
         "under", "without", "within", "among", "before", "behind",
         "despite", "due", "since", "until", "toward", "towards", "onto",
+        "above", "below", "across", "along", "beyond", "near", "upon",
+        "inside", "outside", "beside", "besides", "throughout", "amidst",
+        "each", "every", "both", "either", "neither", "although", "though",
+        "whether",
         "very", "much", "many", "few", "own", "several", "first", "last",
         "next", "best", "worst", "most", "least", "old", "major",
         "everything", "anything", "nothing", "something", "everyone",
@@ -55,7 +59,8 @@ enum TopicGrouper {
         "затова", "защото", "защо", "докато", "след", "преди", "между",
         "върху", "около", "срещу", "заради", "против", "чрез", "освен",
         "според", "въпреки", "относно", "покрай", "тъй", "пък", "ето",
-        "най", "през", "включително",
+        "най", "през", "включително", "към", "при", "над", "под", "пред",
+        "зад", "сред",
         // Bulgarian: pronouns and demonstratives
         "това", "тази", "този", "тези", "онзи", "онази", "онова", "онези",
         "какво", "каква", "какви", "какъв", "кой", "коя", "кое", "кои",
@@ -104,9 +109,18 @@ enum TopicGrouper {
         let key = title.lowercased()
         if let cached = vectorCache[key] { return cached }
         if vectorCache.count > 2000 { vectorCache.removeAll() }
-        let v = embedding?.vector(for: key)
+        // The English model maps text it can't represent (Cyrillic above
+        // all) to near-identical vectors, so without this gate any two
+        // Bulgarian titles measure as "semantically the same story".
+        let v = isLikelyEnglish(title) ? embedding?.vector(for: key) : nil
         vectorCache[key] = v
         return v
+    }
+
+    private static func isLikelyEnglish(_ text: String) -> Bool {
+        let recognizer = NLLanguageRecognizer()
+        recognizer.processString(text)
+        return recognizer.dominantLanguage == .english
     }
 
     /// Quote pairs whose content becomes a single token: Bulgarian „…“,
@@ -116,9 +130,26 @@ enum TopicGrouper {
         ("„", "“"), ("“", "”"), ("«", "»"), ("\u{22}", "\u{22}"),
     ]
 
-    static func tokens(_ title: String) -> Set<String> {
-        var result: Set<String> = []
-        var remainder = title.lowercased()
+    /// A title's keyword set, with the multi-word phrase tokens called out by
+    /// origin — quoted phrases and named entities weigh differently in
+    /// group(). Both subsets contain only space-joined phrases; single words
+    /// are indistinguishable from ordinary tokens on purpose.
+    struct TitleTokens {
+        var tokens: Set<String> = []
+        var quoted: Set<String> = []
+        var names: Set<String> = []
+    }
+
+    /// The name tagger is model-backed and not free; memoize like vectors.
+    /// Main-thread only.
+    private static var tokenCache: [String: TitleTokens] = [:]
+
+    static func tokens(_ title: String) -> TitleTokens {
+        if let cached = tokenCache[title] { return cached }
+        if tokenCache.count > 2000 { tokenCache.removeAll() }
+        var result = TitleTokens()
+        // Original case, not lowercased: the name tagger keys on capitals.
+        var remainder = title
 
         // Quoted text is one keyword: „Има такъв народ“ should link titles
         // quoting the same name, not leak its individual (often generic)
@@ -130,18 +161,55 @@ enum TopicGrouper {
                 let words = words(in: remainder[openRange.upperBound..<closeRange.lowerBound])
                 remainder.removeSubrange(openRange.lowerBound..<closeRange.upperBound)
                 if words.count > 1 {
-                    let phrase = words.joined(separator: " ")
-                    if phrase.count >= 3 { result.insert(phrase) }
+                    let phrase = words.joined(separator: " ").lowercased()
+                    if phrase.count >= 3 {
+                        result.tokens.insert(phrase)
+                        result.quoted.insert(phrase)
+                    }
                 } else if let word = words.first {
-                    insertWord(word, into: &result)
+                    insertWord(word, into: &result.tokens)
                 }
             }
         }
 
-        for word in words(in: remainder[...]) {
-            insertWord(word, into: &result)
+        // Multi-word proper names ("South Korea", "Boris Johnson") become one
+        // phrase token so a shared name reads as one shared thing, not two.
+        // Their component words still enter the set individually — "Trump" in
+        // one title must keep matching "Donald Trump" in another.
+        for name in namePhrases(in: remainder) {
+            result.tokens.insert(name)
+            result.names.insert(name)
         }
+        for word in words(in: remainder[...]) {
+            insertWord(word, into: &result.tokens)
+        }
+        tokenCache[title] = result
         return result
+    }
+
+    private static let nameTagger = NLTagger(tagSchemes: [.nameType])
+
+    /// Multi-word named entities (people, places, organizations), lowercased
+    /// and space-joined. English-only in practice — the nameType scheme has
+    /// no Bulgarian model, so Bulgarian titles simply return nothing.
+    private static func namePhrases(in text: String) -> [String] {
+        guard text.contains(where: \.isUppercase) else { return [] }
+        let nameTags: Set<NLTag> = [.personalName, .placeName, .organizationName]
+        nameTagger.string = text
+        var phrases: [String] = []
+        nameTagger.enumerateTags(
+            in: text.startIndex..<text.endIndex, unit: .word, scheme: .nameType,
+            options: [.omitWhitespace, .omitPunctuation, .joinNames]
+        ) { tag, range in
+            if let tag, nameTags.contains(tag) {
+                let words = words(in: text[range]).map { $0.lowercased() }
+                if words.count > 1 {
+                    phrases.append(words.joined(separator: " "))
+                }
+            }
+            return true
+        }
+        return phrases
     }
 
     private static func words(in text: Substring) -> [String] {
@@ -151,6 +219,7 @@ enum TopicGrouper {
     }
 
     private static func insertWord(_ word: String, into result: inout Set<String>) {
+        let word = word.lowercased()
         if word.count >= 3, !stopwords.contains(word), Int(word) == nil {
             result.insert(word)
         }
@@ -186,25 +255,35 @@ enum TopicGrouper {
 
         for i in articles.indices {
             for j in (i + 1)..<articles.count {
-                let shared = tokenSets[i].intersection(tokenSets[j])
+                let shared = tokenSets[i].tokens.intersection(tokenSets[j].tokens)
                 guard !shared.isEmpty else { continue }
 
-                let unionCount = tokenSets[i].union(tokenSets[j]).count
+                let unionCount = tokenSets[i].tokens.union(tokenSets[j].tokens).count
                 let jaccard = unionCount == 0 ? 0 : Double(shared.count) / Double(unionCount)
-                // A shared quoted phrase (multi-word token) is a much
-                // stronger signal than a shared word: count it double.
-                let sharedWeight = shared.count + shared.lazy.filter { $0.contains(" ") }.count
+                // A shared quoted phrase is a much stronger signal than a
+                // shared word: count it double. A shared multi-word name is
+                // the opposite — one shared thing, not several: the phrase
+                // token absorbs its component words ("south korea" + "south"
+                // + "korea" weigh 1, not 3).
+                let quoted = tokenSets[i].quoted.union(tokenSets[j].quoted)
+                let names = tokenSets[i].names.union(tokenSets[j].names)
+                var sharedWeight = shared.count + shared.lazy.filter { quoted.contains($0) }.count
+                for name in shared where names.contains(name) {
+                    sharedWeight -= name.split(separator: " ")
+                        .filter { shared.contains(String($0)) }.count
+                }
+                // One shared word or name is never the same story — it takes
+                // at least two shared things (or one quoted phrase) to link.
+                guard sharedWeight >= 2 else { continue }
                 if jaccard >= jaccardThreshold || sharedWeight >= 3 {
                     union(i, j)
                     continue
                 }
-                // Embedding link needs ≥2 shared tokens — one generic shared
-                // word ("fixing", "review") plus loose semantic similarity is
-                // not the same story.
-                if sharedWeight >= 2, let va = vectors[i], let vb = vectors[j] {
-                    if cosineDistance(va, vb) <= distanceThreshold {
-                        union(i, j)
-                    }
+                // Embedding link: loose semantic similarity backs up the
+                // shared tokens to catch paraphrased headlines.
+                if let va = vectors[i], let vb = vectors[j],
+                   cosineDistance(va, vb) <= distanceThreshold {
+                    union(i, j)
                 }
             }
         }
@@ -220,7 +299,7 @@ enum TopicGrouper {
             if members.count == 1 {
                 return singleton(members[0])
             }
-            let headline = headline(for: indices.map { tokenSets[$0] },
+            let headline = headline(for: indices.map { tokenSets[$0].tokens },
                                     titles: indices.map { articles[$0].title })
             return TopicGroup(
                 id: members.map(\.id).sorted().joined(separator: "|"),
@@ -257,10 +336,17 @@ enum TopicGrouper {
             for t in set { counts[t, default: 0] += 1 }
         }
         let majority = (tokenSets.count + 1) / 2
-        let common = counts.filter { $0.value > majority || $0.value == tokenSets.count }
+        let candidates = counts.filter { $0.value > majority || $0.value == tokenSets.count }
             .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
-            .prefix(3)
             .map(\.key)
+        // A common phrase makes its component words redundant — without this
+        // a name group would label itself "South Korea · Korea · South".
+        let phrases = candidates.filter { $0.contains(" ") }
+        let common = candidates.filter { token in
+            token.contains(" ") || !phrases.contains { phrase in
+                phrase.split(separator: " ").contains(Substring(token))
+            }
+        }.prefix(3)
         guard !common.isEmpty else { return "Related stories" }
 
         // Recover original casing from the titles.
