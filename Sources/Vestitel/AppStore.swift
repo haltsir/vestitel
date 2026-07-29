@@ -85,9 +85,50 @@ final class AppStore: ObservableObject {
         feeds.contains(where: \.isStore)
     }
 
+    // MARK: Inbox hold (list stability while reading)
+
+    /// While the popover is open on the Inbox tab, articles that arrive keep
+    /// out of the visible list so it never shifts mid-read. Non-nil = hold
+    /// active: anything fetched after this instant is hidden until the user
+    /// taps the "N new" button (which moves the cutoff forward) or the hold
+    /// ends (popover closed / tab left — then everything flows in).
+    /// In-memory only: a restart shows everything, which is correct.
+    @Published var inboxHoldStart: Date? = nil
+
+    private func isHeld(_ article: Article) -> Bool {
+        guard let holdStart = inboxHoldStart else { return false }
+        return article.fetchedAt > holdStart
+    }
+
+    /// Articles waiting behind the hold — the "N new" button's count.
+    var heldCount: Int {
+        guard inboxHoldStart != nil else { return 0 }
+        let storeIDs = storeFeedIDs
+        return articles.lazy.filter {
+            $0.state == .inbox && !storeIDs.contains($0.feedID) && self.isHeld($0)
+        }.count
+    }
+
+    /// Called by ContentView whenever popover visibility or the selected tab
+    /// changes. Starting an already-running hold keeps the original cutoff.
+    func updateInboxHold(active: Bool) {
+        if active {
+            if inboxHoldStart == nil { inboxHoldStart = Date() }
+        } else {
+            inboxHoldStart = nil
+        }
+    }
+
+    /// The "N new" button: reveal what's waiting, keep holding new arrivals.
+    func revealHeldArticles() {
+        guard inboxHoldStart != nil else { return }
+        inboxHoldStart = Date()
+        hasUnseenArticles = false   // the user is looking at them right now
+    }
+
     var inbox: [Article] {
         let storeIDs = storeFeedIDs
-        return articles.filter { $0.state == .inbox && !storeIDs.contains($0.feedID) }
+        return articles.filter { $0.state == .inbox && !storeIDs.contains($0.feedID) && !isHeld($0) }
             .sorted { $0.published > $1.published }
     }
 
@@ -100,7 +141,10 @@ final class AppStore: ObservableObject {
 
     var unreadCount: Int {
         let storeIDs = storeFeedIDs
-        return articles.lazy.filter { $0.state == .inbox && !$0.isRead && !storeIDs.contains($0.feedID) }.count
+        // excludes held articles so the chip matches the visible list
+        return articles.lazy.filter {
+            $0.state == .inbox && !$0.isRead && !storeIDs.contains($0.feedID) && !self.isHeld($0)
+        }.count
     }
 
     var storeUnreadCount: Int {
@@ -629,7 +673,10 @@ final class AppStore: ObservableObject {
     func clearInbox() {
         let now = Date()
         let storeIDs = storeFeedIDs
-        for i in articles.indices where articles[i].state == .inbox && !storeIDs.contains(articles[i].feedID) {
+        // held articles are exempt: "Clear Inbox" clears what the user sees,
+        // never articles they were never shown
+        for i in articles.indices where articles[i].state == .inbox
+            && !storeIDs.contains(articles[i].feedID) && !isHeld(articles[i]) {
             articles[i].state = .cleared
             articles[i].clearedAt = now
         }
@@ -751,8 +798,18 @@ final class AppStore: ObservableObject {
     }
 
     private static var stateURL: URL {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Vestitel", isDirectory: true)
+        // VESTITEL_STATE_DIR points a throwaway instance at its own state so
+        // it can run alongside the real app. Overriding $HOME does NOT work:
+        // FileManager resolves Application Support from the user record, so
+        // without this a "sandboxed" second instance silently shares (and
+        // fights over) the real state file.
+        let dir: URL
+        if let override = ProcessInfo.processInfo.environment["VESTITEL_STATE_DIR"], !override.isEmpty {
+            dir = URL(fileURLWithPath: override, isDirectory: true)
+        } else {
+            dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("Vestitel", isDirectory: true)
+        }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("state.json")
     }

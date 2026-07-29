@@ -39,10 +39,18 @@ struct ContentView: View {
         }
         .frame(width: 500, height: 600)
         .onAppear {
-            store.markSeen()
             store.popoverOpen = true
+            // hold before markSeen: its sync merge must land behind the hold
+            store.updateInboxHold(active: tab == .inbox)
+            store.markSeen()
         }
-        .onDisappear { store.popoverOpen = false }
+        .onDisappear {
+            store.popoverOpen = false
+            store.updateInboxHold(active: false)
+        }
+        .onChange(of: tab) { _, newTab in
+            store.updateInboxHold(active: store.popoverOpen && newTab == .inbox)
+        }
     }
 
     private var header: some View {
@@ -61,6 +69,23 @@ struct ContentView: View {
                         .padding(.vertical, 3)
                         .background(Color.accentColor.opacity(0.15), in: Capsule())
                         .foregroundStyle(Color.accentColor)
+                }
+                // Articles fetched while reading wait behind this button so
+                // the list never shifts underneath the user (see inboxHoldStart).
+                if tab == .inbox, store.heldCount > 0 {
+                    Button {
+                        store.revealHeldArticles()
+                    } label: {
+                        Label("\(store.heldCount) new", systemImage: "arrow.down")
+                            .font(.system(size: 11, weight: .semibold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Color.accentColor, in: Capsule())
+                            .foregroundStyle(.white)
+                            .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Show the articles that arrived while you were reading")
                 }
                 if tab == .store, store.storeUnreadCount > 0 {
                     Text("\(store.storeUnreadCount) new")

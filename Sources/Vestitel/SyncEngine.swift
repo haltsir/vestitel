@@ -226,9 +226,13 @@ extension AppStore {
                 var a = remote
                 a.feedID = localFeed.id
                 a.sourceTitle = localFeed.title
+                seen[a.id] = doc.seen[a.id] ?? a.fetchedAt
+                // local arrival time, not the remote's fetch time — the
+                // inbox hold compares fetchedAt against its cutoff, and a
+                // remote timestamp would predate it and skip the hold
+                a.fetchedAt = now
                 articles.append(a)
                 localIndexByID[a.id] = articles.count - 1
-                seen[a.id] = doc.seen[a.id] ?? a.fetchedAt
                 changed = true
             }
         }
