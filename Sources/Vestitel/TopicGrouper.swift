@@ -60,7 +60,7 @@ enum TopicGrouper {
         "върху", "около", "срещу", "заради", "против", "чрез", "освен",
         "според", "въпреки", "относно", "покрай", "тъй", "пък", "ето",
         "най", "през", "включително", "към", "при", "над", "под", "пред",
-        "зад", "сред",
+        "зад", "сред", "край",
         // Bulgarian: pronouns and demonstratives
         "това", "тази", "този", "тези", "онзи", "онази", "онова", "онези",
         "какво", "каква", "какви", "какъв", "кой", "коя", "кое", "кои",
@@ -161,7 +161,7 @@ enum TopicGrouper {
                 let words = words(in: remainder[openRange.upperBound..<closeRange.lowerBound])
                 remainder.removeSubrange(openRange.lowerBound..<closeRange.upperBound)
                 if words.count > 1 {
-                    let phrase = words.joined(separator: " ").lowercased()
+                    let phrase = words.map { normalize($0.lowercased()) }.joined(separator: " ")
                     if phrase.count >= 3 {
                         result.tokens.insert(phrase)
                         result.quoted.insert(phrase)
@@ -202,7 +202,7 @@ enum TopicGrouper {
             options: [.omitWhitespace, .omitPunctuation, .joinNames]
         ) { tag, range in
             if let tag, nameTags.contains(tag) {
-                let words = words(in: text[range]).map { $0.lowercased() }
+                let words = words(in: text[range]).map { normalize($0.lowercased()) }
                 if words.count > 1 {
                     phrases.append(words.joined(separator: " "))
                 }
@@ -213,14 +213,66 @@ enum TopicGrouper {
     }
 
     private static func words(in text: Substring) -> [String] {
-        text.unicodeScalars
-            .split(whereSeparator: { !CharacterSet.alphanumerics.contains($0) })
-            .map { String(String.UnicodeScalarView($0)) }
+        // A hyphen between alphanumerics is part of the word: "22-годишна"
+        // and "Е-79" are single, highly distinctive tokens — split apart,
+        // the number is dropped and (for ages) the noun is a stopword.
+        var words: [String] = []
+        var current = String.UnicodeScalarView()
+        let scalars = Array(text.unicodeScalars)
+        for (i, s) in scalars.enumerated() {
+            if CharacterSet.alphanumerics.contains(s) {
+                current.append(s)
+            } else if s == "-", !current.isEmpty, i + 1 < scalars.count,
+                      CharacterSet.alphanumerics.contains(scalars[i + 1]) {
+                current.append(s)
+            } else if !current.isEmpty {
+                words.append(String(current))
+                current = String.UnicodeScalarView()
+            }
+        }
+        if !current.isEmpty { words.append(String(current)) }
+        return words
+    }
+
+    /// Strip the Bulgarian definite-article suffix so "детска" and
+    /// "детската" become the same keyword. Deliberately context-gated —
+    /// naive suffix stripping mangles words that end in those letters
+    /// naturally ("злато", "място", "карта", "дете"):
+    ///  - -та only after а/я ("жената") or т/щ ("радостта", "нощта");
+    ///    never after other consonants, which is where "карта"/"лента" live
+    ///  - -то only after о/е ("морето", "детето") — "злато"/"място" keep
+    ///  - -те only after и/е ("колите", "мъжете")
+    ///  - -ът always ("градът"); -ят only after a consonant ("конят" → кон,
+    ///    but "краят" keeps its я — it's the stem's elided й, край)
+    /// The stem must keep ≥3 characters ("дете" survives its -те ending).
+    private static func normalize(_ word: String) -> String {
+        guard let last = word.unicodeScalars.last,
+              (0x400...0x4FF).contains(last.value) else { return word }
+        for ending in ["ата", "ята", "тта", "щта", "ото", "ето", "ите", "ете"]
+        where word.hasSuffix(ending) {
+            let stem = String(word.dropLast(2))
+            return stem.count >= 3 ? stem : word
+        }
+        if word.hasSuffix("ът") {
+            let stem = String(word.dropLast(2))
+            return stem.count >= 3 ? stem : word
+        }
+        if word.hasSuffix("ят") {
+            let stem = String(word.dropLast(2))
+            if stem.count >= 3, let c = stem.last, !"аъоуеияюй".contains(c) {
+                return stem
+            }
+        }
+        return word
     }
 
     private static func insertWord(_ word: String, into result: inout Set<String>) {
-        let word = word.lowercased()
-        if word.count >= 3, !stopwords.contains(word), Int(word) == nil {
+        let raw = word.lowercased()
+        let word = normalize(raw)
+        // both forms checked: "годината" normalizes into the stopword
+        // "година"; "правят" is a stopword only in its raw form
+        if word.count >= 3, !stopwords.contains(raw), !stopwords.contains(word),
+           Int(word) == nil {
             result.insert(word)
         }
     }
@@ -364,7 +416,9 @@ enum TopicGrouper {
             } else {
                 outer: for title in titles {
                     for word in title.split(whereSeparator: { !$0.isLetter && !$0.isNumber }) {
-                        if word.lowercased() == token { found = String(word); break outer }
+                        // normalized compare: token "детска" is recovered
+                        // from a title that spells it "Детската"
+                        if normalize(word.lowercased()) == token { found = String(word); break outer }
                     }
                 }
             }
