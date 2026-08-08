@@ -106,11 +106,20 @@ extension AppStore {
     /// Called from save(), so every local mutation propagates promptly.
     func writeSyncDocument() {
         guard let folder = syncFolderURL else { return }
+        // lastFetched/lastError are per-machine fetch status, not shared
+        // state — included, every refresh becomes a payload change and the
+        // cloud client re-uploads the whole file even when nothing new came.
+        let sharedFeeds = feeds.map { feed in
+            var f = feed
+            f.lastFetched = nil
+            f.lastError = nil
+            return f
+        }
         var doc = SyncDocument(
             machineID: machineID,
             machineName: Host.current().localizedName ?? "Mac",
             updatedAt: .distantPast,   // placeholder: excluded from change compare
-            feeds: feeds, articles: articles, seen: seen,
+            feeds: sharedFeeds, articles: articles, seen: seen,
             archive: archive, bookmarks: bookmarks,
             removedFeeds: removedFeeds, removedBookmarks: removedBookmarks,
             archiveClearedAt: archiveClearedAt
@@ -239,7 +248,15 @@ extension AppStore {
 
         // Seen: union, earliest first-seen date wins. This is what keeps a
         // store product cleared on one Mac from ever resurfacing on another.
+        // Entries sweep() would immediately prune are not adopted — otherwise
+        // a locally-pruned id resurrects from any document that still carries
+        // it, and the prune → merge → prune cycle rewrites the sync file (and
+        // keeps the cloud client busy) around every entry aging past
+        // retention. Store keys are exempt, mirroring sweep().
+        let storeKeyPrefixes = feeds.filter(\.isStore).map { $0.url.absoluteString + "#" }
         for (id, date) in doc.seen where date < (seen[id] ?? .distantFuture) {
+            if now.timeIntervalSince(date) >= AppSettings.seenRetention,
+               !storeKeyPrefixes.contains(where: id.hasPrefix) { continue }
             seen[id] = date
             changed = true
         }
