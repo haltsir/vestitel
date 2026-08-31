@@ -373,6 +373,11 @@ struct ArticleRow: View {
                         Label("clears in \(minutes) min", systemImage: "clock")
                             .foregroundStyle(.tertiary)
                     }
+                    if let keyword = article.filteredBy {
+                        Text("·")
+                        Label("muted: \(keyword)", systemImage: "line.3.horizontal.decrease.circle")
+                            .foregroundStyle(.tertiary)
+                    }
                 }
                 .font(.system(size: 11.5))
                 .foregroundStyle(.secondary)

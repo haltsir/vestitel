@@ -245,6 +245,12 @@ extension AppStore {
                 // inbox hold compares fetchedAt against its cutoff, and a
                 // remote timestamp would predate it and skip the hold
                 a.fetchedAt = now
+                // this Mac's muted keywords apply to what it adopts, too
+                if a.state == .inbox, let keyword = mutedKeyword(matching: a) {
+                    a.state = .cleared
+                    a.clearedAt = now
+                    a.filteredBy = keyword
+                }
                 articles.append(a)
                 localIndexByID[a.id] = articles.count - 1
                 changed = true

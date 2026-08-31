@@ -13,6 +13,7 @@ struct SettingsView: View {
     @State private var importResult: String?
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var launchAtLoginError: String?
+    @State private var newMutedKeyword = ""
 
     var body: some View {
         ScrollView {
@@ -20,6 +21,8 @@ struct SettingsView: View {
                 feedsSection
                 Divider()
                 behaviorSection
+                Divider()
+                mutedKeywordsSection
                 Divider()
                 syncSection
                 Divider()
@@ -238,6 +241,50 @@ struct SettingsView: View {
             launchAtLoginError = "Couldn't update login item: \(error.localizedDescription)"
             launchAtLogin = service.status == .enabled
         }
+    }
+
+    // MARK: Muted keywords
+
+    private var mutedKeywordsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("Muted Keywords")
+
+            HStack(spacing: 8) {
+                TextField("e.g. horoscope, Mercury retrograde", text: $newMutedKeyword)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 13))
+                    .onSubmit(addMutedKeyword)
+                Button("Add", action: addMutedKeyword)
+                    .buttonStyle(HoverButtonStyle(prominent: true))
+                    .disabled(newMutedKeyword.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+
+            if store.settings.mutedKeywords.isEmpty {
+                Text("No muted keywords.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.tertiary)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(store.settings.mutedKeywords, id: \.self) { keyword in
+                        MutedKeywordRow(keyword: keyword)
+                        if keyword != store.settings.mutedKeywords.last {
+                            Divider().padding(.leading, 12)
+                        }
+                    }
+                }
+                .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
+            }
+
+            Text("An article whose title or summary contains a muted keyword (any case) skips the Inbox and goes straight to Cleared, tagged with the keyword. Adding a keyword also clears matching articles already in the Inbox; removing it brings back the ones it caught. Review the catch under Cleared → Filtered.")
+                .font(.system(size: 11.5))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func addMutedKeyword() {
+        store.addMutedKeyword(newMutedKeyword)
+        newMutedKeyword = ""
     }
 
     // MARK: Sync between Macs
@@ -554,6 +601,37 @@ struct SettingRow<Control: View>: View {
         .padding(-7)
         .onHover { hovering = $0 }
         .onTapGesture { onTap?() }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+struct MutedKeywordRow: View {
+    @EnvironmentObject var store: AppStore
+    let keyword: String
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "line.3.horizontal.decrease.circle")
+                .foregroundStyle(.secondary)
+            Text(keyword)
+                .font(.system(size: 13))
+                .lineLimit(1)
+            Spacer()
+            RowActionButton(
+                icon: "trash",
+                tint: .red,
+                help: "Stop muting this keyword (articles it caught return to the inbox)",
+                visible: hovering
+            ) {
+                store.removeMutedKeyword(keyword)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
+        .background(hovering ? Color.primary.opacity(0.05) : .clear, in: RoundedRectangle(cornerRadius: 8))
+        .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
     }
 }

@@ -52,8 +52,13 @@ struct Article: Identifiable, Codable, Hashable {
     var state: ArticleState = .inbox
     var readAt: Date? = nil     // set when clicked; auto-clears 15 min later
     var clearedAt: Date? = nil  // set when cleared; purged 24h later
+    /// The muted keyword that sent this article straight to Cleared, so the
+    /// Cleared tab can show what the filters caught. nil = cleared by hand
+    /// or by the read countdown.
+    var filteredBy: String? = nil
 
     var isRead: Bool { readAt != nil }
+    var isFiltered: Bool { filteredBy != nil }
 }
 
 // MARK: - Archive
@@ -106,6 +111,10 @@ struct AppSettings: Codable {
     /// Check GitHub releases once a day and install a signed newer build
     /// while the app is idle (see Updater.swift).
     var autoUpdateEnabled: Bool = true
+    /// Articles whose title or summary contains one of these (case-
+    /// insensitive substring) never reach the Inbox: they are cleared on
+    /// arrival, tagged with the keyword, and reviewable in the Cleared tab.
+    var mutedKeywords: [String] = []
 
     init() {}
 
@@ -121,6 +130,7 @@ struct AppSettings: Codable {
         compactRows = try c.decodeIfPresent(Bool.self, forKey: .compactRows) ?? false
         syncFolderPath = try c.decodeIfPresent(String.self, forKey: .syncFolderPath)
         autoUpdateEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoUpdateEnabled) ?? true
+        mutedKeywords = try c.decodeIfPresent([String].self, forKey: .mutedKeywords) ?? []
     }
 
     static let readClearInterval: TimeInterval = 15 * 60       // 15 minutes

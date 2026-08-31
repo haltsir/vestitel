@@ -20,7 +20,12 @@ final class AppStore: ObservableObject {
     @Published var archive: [ArchiveEntry] = []
     @Published var bookmarks: [BookmarkEntry] = []
     @Published var settings: AppSettings = AppSettings() {
-        didSet { scheduleRefreshTimer(); save(); updateSyncFolderWatcher() }
+        didSet {
+            scheduleRefreshTimer()
+            if settings.mutedKeywords != oldValue.mutedKeywords { applyMutedKeywords() }
+            save()
+            updateSyncFolderWatcher()
+        }
     }
     @Published var isRefreshing = false
     /// Feeds being fetched by the per-feed refresh button (row spinners).
@@ -140,9 +145,68 @@ final class AppStore: ObservableObject {
         articles.lazy.filter { $0.state == .inbox && !$0.isRead && !self.isHeld($0) }.count
     }
 
+    /// Cleared by the user or the read countdown; keyword-filtered articles
+    /// are listed separately so they don't bury the ones you cleared.
     var cleared: [Article] {
-        articles.filter { $0.state == .cleared }
+        articles.filter { $0.state == .cleared && !$0.isFiltered }
             .sorted { ($0.clearedAt ?? .distantPast) > ($1.clearedAt ?? .distantPast) }
+    }
+
+    /// Articles a muted keyword caught, newest first (the Cleared tab's
+    /// "Filtered" view, for checking that the filters do what you meant).
+    var filtered: [Article] {
+        articles.filter { $0.state == .cleared && $0.isFiltered }
+            .sorted { ($0.clearedAt ?? .distantPast) > ($1.clearedAt ?? .distantPast) }
+    }
+
+    // MARK: Muted keywords
+
+    /// The first muted keyword found in the title or summary, or nil.
+    /// Case-insensitive substring match, so "меркурий" also catches
+    /// "Меркурий" and "ретроградния Меркурий".
+    func mutedKeyword(matching article: Article) -> String? {
+        let keywords = settings.mutedKeywords
+        guard !keywords.isEmpty else { return nil }
+        let haystack = (article.title + "\n" + (article.summary ?? "")).lowercased()
+        return keywords.first { keyword in
+            let needle = keyword.lowercased()
+            return !needle.isEmpty && haystack.contains(needle)
+        }
+    }
+
+    /// Re-run the filters over the whole inbox: adding a keyword should
+    /// remove what's already there, not just what arrives next. Also
+    /// releases articles a since-deleted keyword had caught, as long as
+    /// they still hold up as cleared-by-filter, so a wrong keyword can be
+    /// undone by removing it. Doesn't touch anything cleared by hand.
+    func applyMutedKeywords() {
+        let now = Date()
+        for i in articles.indices {
+            let match = mutedKeyword(matching: articles[i])
+            if articles[i].state == .inbox, let match {
+                articles[i].state = .cleared
+                articles[i].clearedAt = now
+                articles[i].filteredBy = match
+            } else if articles[i].state == .cleared, articles[i].isFiltered, match == nil {
+                articles[i].state = .inbox
+                articles[i].clearedAt = nil
+                articles[i].readAt = nil
+                articles[i].filteredBy = nil
+                articles[i].fetchedAt = now   // respects the inbox hold like any arrival
+            }
+        }
+    }
+
+    func addMutedKeyword(_ raw: String) {
+        let keyword = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !keyword.isEmpty,
+              !settings.mutedKeywords.contains(where: { $0.caseInsensitiveCompare(keyword) == .orderedSame })
+        else { return }
+        settings.mutedKeywords.append(keyword)
+    }
+
+    func removeMutedKeyword(_ keyword: String) {
+        settings.mutedKeywords.removeAll { $0 == keyword }
     }
 
     /// Cached grouping structure: recomputing runs sentence embeddings over
@@ -488,7 +552,9 @@ final class AppStore: ObservableObject {
         return head.contains("<!doctype html") || head.contains("<html")
     }
 
-    /// Returns how many articles were actually new.
+    /// Returns how many articles were actually new *and* reached the inbox:
+    /// keyword-filtered arrivals are stored as cleared and don't count, so
+    /// they never trigger the new-articles signal.
     /// (internal, not private: LocalSources ingests through it)
     @discardableResult
     func ingest(_ items: [ParsedItem], into feed: Feed) -> Int {
@@ -501,8 +567,7 @@ final class AppStore: ObservableObject {
             let id = "\(feed.url.absoluteString)#\(key)"
             guard seen[id] == nil else { continue }
             seen[id] = now
-            added += 1
-            articles.append(Article(
+            var article = Article(
                 id: id,
                 feedID: feed.id,
                 sourceTitle: feed.title,
@@ -512,7 +577,15 @@ final class AppStore: ObservableObject {
                 imageURL: item.imageURL,
                 published: item.published ?? now,
                 fetchedAt: now
-            ))
+            )
+            if let keyword = mutedKeyword(matching: article) {
+                article.state = .cleared
+                article.clearedAt = now
+                article.filteredBy = keyword
+            } else {
+                added += 1
+            }
+            articles.append(article)
         }
         return added
     }
@@ -641,12 +714,15 @@ final class AppStore: ObservableObject {
         save()
     }
 
-    /// Move a cleared article back to the inbox (unread).
+    /// Move a cleared article back to the inbox (unread). Restoring a
+    /// filtered article overrides the filter for that article only; the
+    /// keyword stays.
     func restore(_ article: Article) {
         mutate(article) {
             $0.state = .inbox
             $0.clearedAt = nil
             $0.readAt = nil
+            $0.filteredBy = nil
         }
         save()
     }

@@ -2,16 +2,33 @@ import SwiftUI
 
 struct ClearedView: View {
     @EnvironmentObject var store: AppStore
+    /// Show what the muted keywords caught instead of what you cleared.
+    /// Transient: opening the tab always starts on the cleared list.
+    @State private var showingFiltered = false
 
     var body: some View {
-        let cleared = store.cleared
+        let cleared = showingFiltered ? store.filtered : store.cleared
+        let filteredCount = store.filtered.count
 
         VStack(spacing: 0) {
             HStack {
-                Label("Cleared articles are kept for 24 hours, then removed.", systemImage: "info.circle")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(.secondary)
+                Label(
+                    showingFiltered
+                        ? "Caught by your muted keywords. Restore one if a filter misfires."
+                        : "Cleared articles are kept for 24 hours, then removed.",
+                    systemImage: showingFiltered ? "line.3.horizontal.decrease.circle" : "info.circle"
+                )
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
                 Spacer()
+                if filteredCount > 0 || showingFiltered {
+                    Toggle(isOn: $showingFiltered) {
+                        Text("Filtered (\(filteredCount))")
+                    }
+                    .toggleStyle(.button)
+                    .buttonStyle(HoverButtonStyle())
+                    .help("Show articles your muted keywords kept out of the inbox")
+                }
             }
             .padding(.horizontal, 14)
             .frame(height: 40)
@@ -19,11 +36,19 @@ struct ClearedView: View {
             Divider()
 
             if cleared.isEmpty {
-                EmptyStateView(
-                    icon: "clock.arrow.circlepath",
-                    title: "Nothing cleared recently",
-                    subtitle: "Articles you clear will stay here for 24 hours in case you need them back."
-                )
+                if showingFiltered {
+                    EmptyStateView(
+                        icon: "line.3.horizontal.decrease.circle",
+                        title: "Nothing filtered recently",
+                        subtitle: "Articles caught by a muted keyword (Settings) wait here for 24 hours, then go away."
+                    )
+                } else {
+                    EmptyStateView(
+                        icon: "clock.arrow.circlepath",
+                        title: "Nothing cleared recently",
+                        subtitle: "Articles you clear will stay here for 24 hours in case you need them back."
+                    )
+                }
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
