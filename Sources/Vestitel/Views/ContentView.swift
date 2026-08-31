@@ -2,7 +2,6 @@ import SwiftUI
 
 enum Tab: String, CaseIterable {
     case inbox = "Inbox"
-    case store = "Store"
     case cleared = "Cleared"
     case bookmarks = "Bookmarks"
     case archive = "Archive"
@@ -11,7 +10,6 @@ enum Tab: String, CaseIterable {
     var icon: String {
         switch self {
         case .inbox: return "tray.full"
-        case .store: return "cart"
         case .cleared: return "clock.arrow.circlepath"
         case .bookmarks: return "bookmark"
         case .archive: return "archivebox"
@@ -30,7 +28,6 @@ struct ContentView: View {
             Divider()
             switch tab {
             case .inbox: InboxView()
-            case .store: StoreView()
             case .cleared: ClearedView()
             case .bookmarks: BookmarksView()
             case .archive: ArchiveView()
@@ -87,14 +84,6 @@ struct ContentView: View {
                     .buttonStyle(.plain)
                     .help("Show the articles that arrived while you were reading")
                 }
-                if tab == .store, store.storeUnreadCount > 0 {
-                    Text("\(store.storeUnreadCount) new")
-                        .font(.system(size: 11, weight: .semibold))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(Color.accentColor.opacity(0.15), in: Capsule())
-                        .foregroundStyle(Color.accentColor)
-                }
 
                 Spacer()
 
@@ -119,21 +108,14 @@ struct ContentView: View {
                 }
             }
 
-            // The Store tab only exists while there is something store-ish to
-            // show: a store-watch feed, or the latest-additions scan.
-            let showsStore = store.showsStoreTab
-            let tabs = showsStore ? Tab.allCases : Tab.allCases.filter { $0 != .store }
             Picker("", selection: $tab) {
-                ForEach(tabs, id: \.self) { t in
+                ForEach(Tab.allCases, id: \.self) { t in
                     Text(t.rawValue).tag(t)
                 }
             }
             .pickerStyle(.segmented)
             .controlSize(.large)
             .labelsHidden()
-            .onChange(of: showsStore) { _, shows in
-                if !shows, tab == .store { tab = .inbox }
-            }
         }
         .padding(.horizontal, 14)
         .padding(.top, 12)

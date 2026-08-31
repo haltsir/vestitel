@@ -21,8 +21,6 @@ struct SettingsView: View {
                 Divider()
                 behaviorSection
                 Divider()
-                storeScanSection
-                Divider()
                 syncSection
                 Divider()
                 localSourcesSection
@@ -240,43 +238,6 @@ struct SettingsView: View {
             launchAtLoginError = "Couldn't update login item: \(error.localizedDescription)"
             launchAtLogin = service.status == .enabled
         }
-    }
-
-    // MARK: Latest-additions scan
-
-    private var storeScanSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("\(StoreScan.siteName) Latest Additions")
-
-            SettingRow(
-                title: "Scan the whole listing daily",
-                subtitle: scanSubtitle,
-                onTap: { store.settings.storeScanEnabled.toggle() }
-            ) {
-                Toggle("", isOn: $store.settings.storeScanEnabled)
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-            }
-
-            Text("The \"latest additions\" page doesn't reliably order products by when they appeared: something added today can sit ten pages deep. The scan therefore walks every page, pausing several seconds between requests so the site doesn't take it for a crawler; a full pass takes a few minutes. Results don't enter the Store inbox: when the scan finishes you get a notification whose Open Report button builds a temporary HTML page of everything new. Run one ad-hoc from the Store tab.")
-                .font(.system(size: 11.5))
-                .foregroundStyle(.tertiary)
-        }
-    }
-
-    private var scanSubtitle: String {
-        guard store.settings.storeScanEnabled else {
-            return "Off. Turning it on records a baseline right away, then scans every day at \(String(format: "%d:%02d", StoreScan.dailyHour, StoreScan.dailyMinute))."
-        }
-        if let progress = store.storeScanProgress {
-            return progress.page == 0
-                ? "Scanning…"
-                : "Scanning page \(progress.page) of \(progress.pageCount), \(progress.found) products so far."
-        }
-        if let next = store.nextStoreScanDate {
-            return "Next scan \(next.articleDisplay)."
-        }
-        return "Runs daily at \(String(format: "%d:%02d", StoreScan.dailyHour, StoreScan.dailyMinute))."
     }
 
     // MARK: Sync between Macs
@@ -626,15 +587,6 @@ struct FeedRowView: View {
                             .lineLimit(1)
                             .onTapGesture(count: 2) { beginRename() }
                             .help("Double-click to rename")
-                        if feed.isStore {
-                            Text("STORE")
-                                .font(.system(size: 9, weight: .bold))
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1.5)
-                                .background(Color.accentColor.opacity(0.15), in: Capsule())
-                                .foregroundStyle(Color.accentColor)
-                                .help("Store watch: new products land in the Store tab; cleared products never reappear")
-                        }
                         if feed.isLocal {
                             Text("LOCAL")
                                 .font(.system(size: 9, weight: .bold))

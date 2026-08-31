@@ -66,23 +66,6 @@ final class AppStore: ObservableObject {
     /// Last written sync payload (updatedAt zeroed) — skip no-op writes.
     var lastSyncPayload: Data? = nil
 
-    // MARK: Store scan state (see StoreScanner.swift)
-
-    /// Non-nil while the listing scan is walking pages.
-    @Published var storeScanProgress: StoreScanProgress? = nil
-    /// The last completed scan, kept so its report stays openable (from the
-    /// notification, or the button) across restarts.
-    @Published var lastStoreScanResult: StoreScanResult? = nil
-    /// Product URL -> when the scan first saw it. This is what makes a
-    /// product "new"; see StoreScan.seenRetention for how it is pruned.
-    var storeScanSeen: [String: Date] = [:]
-    /// True once a scan has walked the whole listing at least once.
-    var storeScanBaselineDone = false
-    /// When a scan was last started (successful or not) — the daily trigger
-    /// uses it to know today is done.
-    var lastStoreScanAttempt: Date? = nil
-    var storeScanTask: Task<Void, Never>? = nil
-
     // MARK: Updater state (see Updater.swift)
 
     /// Human-readable progress/result of the last update check, for Settings.
@@ -109,22 +92,6 @@ final class AppStore: ObservableObject {
 
     // MARK: - Derived collections
 
-    /// Store-watch feeds have their own inbox; ids resolve which side of the
-    /// split an article belongs to.
-    private var storeFeedIDs: Set<UUID> {
-        Set(feeds.lazy.filter(\.isStore).map(\.id))
-    }
-
-    var hasStoreFeeds: Bool {
-        feeds.contains(where: \.isStore)
-    }
-
-    /// The Store tab exists while there is something store-ish to show:
-    /// a store-watch feed, or the latest-additions scan.
-    var showsStoreTab: Bool {
-        hasStoreFeeds || settings.storeScanEnabled
-    }
-
     // MARK: Inbox hold (list stability while reading)
 
     /// While the popover is open on the Inbox tab, articles that arrive keep
@@ -143,10 +110,7 @@ final class AppStore: ObservableObject {
     /// Articles waiting behind the hold — the "N new" button's count.
     var heldCount: Int {
         guard inboxHoldStart != nil else { return 0 }
-        let storeIDs = storeFeedIDs
-        return articles.lazy.filter {
-            $0.state == .inbox && !storeIDs.contains($0.feedID) && self.isHeld($0)
-        }.count
+        return articles.lazy.filter { $0.state == .inbox && self.isHeld($0) }.count
     }
 
     /// Called by ContentView whenever popover visibility or the selected tab
@@ -167,29 +131,13 @@ final class AppStore: ObservableObject {
     }
 
     var inbox: [Article] {
-        let storeIDs = storeFeedIDs
-        return articles.filter { $0.state == .inbox && !storeIDs.contains($0.feedID) && !isHeld($0) }
-            .sorted { $0.published > $1.published }
-    }
-
-    /// New products from store-watch feeds — the separate Store tab inbox.
-    var storeInbox: [Article] {
-        let storeIDs = storeFeedIDs
-        return articles.filter { $0.state == .inbox && storeIDs.contains($0.feedID) }
+        articles.filter { $0.state == .inbox && !isHeld($0) }
             .sorted { $0.published > $1.published }
     }
 
     var unreadCount: Int {
-        let storeIDs = storeFeedIDs
         // excludes held articles so the chip matches the visible list
-        return articles.lazy.filter {
-            $0.state == .inbox && !$0.isRead && !storeIDs.contains($0.feedID) && !self.isHeld($0)
-        }.count
-    }
-
-    var storeUnreadCount: Int {
-        let storeIDs = storeFeedIDs
-        return articles.lazy.filter { $0.state == .inbox && !$0.isRead && storeIDs.contains($0.feedID) }.count
+        articles.lazy.filter { $0.state == .inbox && !$0.isRead && !self.isHeld($0) }.count
     }
 
     var cleared: [Article] {
@@ -240,11 +188,6 @@ final class AppStore: ObservableObject {
     init() {
         NotificationManager.shared.setup()
         load()
-        // The scan notification's "Open Report" button re-renders the report
-        // from the last result rather than pointing at a stored file.
-        NotificationManager.shared.onOpenStoreScanReport = { [weak self] in
-            self?.openStoreScanReport()
-        }
         // Local sources: files already waiting in the drop folder, then
         // whatever arrives later (folder watcher, vestitel:// URLs).
         startLocalEventsWatcher()
@@ -289,18 +232,14 @@ final class AppStore: ObservableObject {
         do {
             let (data, response) = try await session.data(from: url)
             let parsed: ParsedFeed
-            var kind = FeedKind.rss
             if let rss = try? FeedParser.parse(data: data) {
                 parsed = rss
-            } else if let store = try? StorePageParser.parse(data: data, pageURL: url) {
-                parsed = store
-                kind = .store
             } else if Self.looksBlocked(response: response, data: data) {
                 return FeedBlockedError(host: url.host ?? "The site").localizedDescription
             } else {
-                return "The URL did not return a recognizable RSS/Atom feed or store listing page."
+                return "The URL did not return a recognizable RSS/Atom feed."
             }
-            var feed = Feed(url: url, title: parsed.title.isEmpty ? (url.host ?? raw) : parsed.title, kind: kind)
+            var feed = Feed(url: url, title: parsed.title.isEmpty ? (url.host ?? raw) : parsed.title, kind: .rss)
             feed.lastFetched = Date()
             feeds.append(feed)
             removedFeeds[url.absoluteString] = nil  // re-adding beats any old tombstone
@@ -315,12 +254,11 @@ final class AppStore: ObservableObject {
         }
     }
 
-    /// True if the URL fetches and parses as an RSS/Atom feed or a store
-    /// listing page — anything addFeed would accept.
+    /// True if the URL fetches and parses as an RSS/Atom feed, i.e. anything
+    /// addFeed would accept.
     func isFeed(url: URL) async -> Bool {
         guard let (data, _) = try? await session.data(from: url) else { return false }
-        if (try? FeedParser.parse(data: data)) != nil { return true }
-        return (try? StorePageParser.parse(data: data, pageURL: url)) != nil
+        return (try? FeedParser.parse(data: data)) != nil
     }
 
     // MARK: - Source colours
@@ -437,10 +375,7 @@ final class AppStore: ObservableObject {
         do {
             let (data, response) = try await session.data(from: feed.url)
             do {
-                let parsed = feed.isStore
-                    ? try StorePageParser.parse(data: data, pageURL: feed.url)
-                    : try FeedParser.parse(data: data)
-                return .success(parsed)
+                return .success(try FeedParser.parse(data: data))
             } catch {
                 if Self.looksBlocked(response: response, data: data) {
                     return .failure(FeedBlockedError(host: feed.url.host ?? "The site"))
@@ -559,10 +494,8 @@ final class AppStore: ObservableObject {
     func ingest(_ items: [ParsedItem], into feed: Feed) -> Int {
         let now = Date()
         var added = 0
-        // Store listings aren't capped: the page itself bounds the count, and
-        // truncating would silently drop products from the watch. Local
-        // sources neither: every posted event was posted on purpose.
-        let cap = feed.isStore || feed.isLocal ? items.count : settings.maxArticlesPerFeed
+        // Local sources aren't capped: every posted event was posted on purpose.
+        let cap = feed.isLocal ? items.count : settings.maxArticlesPerFeed
         for item in items.prefix(cap) {
             let key = item.guid ?? item.link?.absoluteString ?? item.title
             let id = "\(feed.url.absoluteString)#\(key)"
@@ -731,21 +664,9 @@ final class AppStore: ObservableObject {
 
     func clearInbox() {
         let now = Date()
-        let storeIDs = storeFeedIDs
         // held articles are exempt: "Clear Inbox" clears what the user sees,
         // never articles they were never shown
-        for i in articles.indices where articles[i].state == .inbox
-            && !storeIDs.contains(articles[i].feedID) && !isHeld(articles[i]) {
-            articles[i].state = .cleared
-            articles[i].clearedAt = now
-        }
-        save()
-    }
-
-    func clearStoreInbox() {
-        let now = Date()
-        let storeIDs = storeFeedIDs
-        for i in articles.indices where articles[i].state == .inbox && storeIDs.contains(articles[i].feedID) {
+        for i in articles.indices where articles[i].state == .inbox && !isHeld(articles[i]) {
             articles[i].state = .cleared
             articles[i].clearedAt = now
         }
@@ -788,22 +709,14 @@ final class AppStore: ObservableObject {
         }
         if articles.count != purgeCount { changed = true }
 
-        // Store-watch ids are exempt from seen pruning: a cleared product
-        // must never re-ingest, no matter how long it stays in the listing.
-        // (Article ids are "<feed url>#<key>", so a prefix match suffices.)
-        let storeKeyPrefixes = feeds.filter(\.isStore).map { $0.url.absoluteString + "#" }
         let seenCount = seen.count
-        seen = seen.filter { entry in
-            now.timeIntervalSince(entry.value) < AppSettings.seenRetention
-                || storeKeyPrefixes.contains(where: entry.key.hasPrefix)
-        }
+        seen = seen.filter { now.timeIntervalSince($0.value) < AppSettings.seenRetention }
         if seen.count != seenCount { changed = true }
 
         if changed { save() }
 
-        // The daily listing scan rides this timer instead of a one-shot timer
-        // aimed at 08:30, which sleep or a late launch would silently miss.
-        maybeRunDailyStoreScan()
+        // The daily update check rides this timer instead of a one-shot timer
+        // aimed at 12:30, which sleep or a late launch would silently miss.
         maybeRunDailyUpdateCheck()
     }
 
@@ -859,12 +772,6 @@ final class AppStore: ObservableObject {
         var removedFeeds: [String: Date]?
         var removedBookmarks: [String: Date]?
         var archiveClearedAt: Date?
-        // store scan additions — optional, older state files predate them.
-        // Per-machine on purpose: the scan is not part of the sync document.
-        var storeScanSeen: [String: Date]?
-        var storeScanBaselineDone: Bool?
-        var lastStoreScanAttempt: Date?
-        var lastStoreScanResult: StoreScanResult?
         // updater additions, optional likewise
         var lastUpdateCheck: Date?
         var lastRunVersion: String?
@@ -898,8 +805,6 @@ final class AppStore: ObservableObject {
             bookmarks: bookmarks, settings: settings, seen: seen,
             machineID: machineID, removedFeeds: removedFeeds,
             removedBookmarks: removedBookmarks, archiveClearedAt: archiveClearedAt,
-            storeScanSeen: storeScanSeen, storeScanBaselineDone: storeScanBaselineDone,
-            lastStoreScanAttempt: lastStoreScanAttempt, lastStoreScanResult: lastStoreScanResult,
             lastUpdateCheck: lastUpdateCheck, lastRunVersion: lastRunVersion
         )
         let encoder = JSONEncoder()
@@ -924,10 +829,6 @@ final class AppStore: ObservableObject {
         removedFeeds = state.removedFeeds ?? [:]
         removedBookmarks = state.removedBookmarks ?? [:]
         archiveClearedAt = state.archiveClearedAt
-        storeScanSeen = state.storeScanSeen ?? [:]
-        storeScanBaselineDone = state.storeScanBaselineDone ?? false
-        lastStoreScanAttempt = state.lastStoreScanAttempt
-        lastStoreScanResult = state.lastStoreScanResult
         lastUpdateCheck = state.lastUpdateCheck
         lastRunVersion = state.lastRunVersion
         // last: its didSet fires save() → writeSyncDocument(), which must see

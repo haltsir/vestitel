@@ -4,10 +4,6 @@ import Foundation
 
 enum FeedKind: String, Codable {
     case rss
-    /// A store product-listing page watched for new products (ozone.bg-style
-    /// category pages). Products land in the separate Store inbox, and their
-    /// `seen` entries are kept forever so a cleared product never reappears.
-    case store
     /// A source that lives on this Mac: another app or a script posting
     /// "things that happened" through the events drop folder or the
     /// vestitel:// URL scheme (see LocalSources.swift). Never fetched; its
@@ -25,10 +21,9 @@ struct Feed: Identifiable, Codable, Hashable {
     var lastError: String? = nil
     /// Index into SourcePalette; nil = automatic (derived from the URL).
     var colorIndex: Int? = nil
-    /// nil = rss (pre-store state files decode tolerantly).
+    /// nil = rss (older state files decode tolerantly).
     var kind: FeedKind? = nil
 
-    var isStore: Bool { kind == .store }
     var isLocal: Bool { kind == .local }
 
     /// Host to look a favicon up for; nil when the feed has no site (local
@@ -108,10 +103,6 @@ struct AppSettings: Codable {
     /// Drive etc.); nil = sync off. Each machine writes only its own
     /// vestitel-<machineID>.json there and merges the others'.
     var syncFolderPath: String? = nil
-    /// Walk every page of the Ozone "latest additions" listing once a day at
-    /// StoreScan.dailyHour:dailyMinute and report what wasn't there before.
-    /// Off by default — the scan makes dozens of slow requests.
-    var storeScanEnabled: Bool = false
     /// Check GitHub releases once a day and install a signed newer build
     /// while the app is idle (see Updater.swift).
     var autoUpdateEnabled: Bool = true
@@ -129,7 +120,6 @@ struct AppSettings: Codable {
         allowColoredIcon = try c.decodeIfPresent(Bool.self, forKey: .allowColoredIcon) ?? true
         compactRows = try c.decodeIfPresent(Bool.self, forKey: .compactRows) ?? false
         syncFolderPath = try c.decodeIfPresent(String.self, forKey: .syncFolderPath)
-        storeScanEnabled = try c.decodeIfPresent(Bool.self, forKey: .storeScanEnabled) ?? false
         autoUpdateEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoUpdateEnabled) ?? true
     }
 

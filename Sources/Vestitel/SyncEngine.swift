@@ -57,7 +57,7 @@ extension AppStore {
                 Task { await self.syncNow() }
             }
         }
-        let unreadBefore = unreadCount + storeUnreadCount
+        let unreadBefore = unreadCount
 
         let ownFile = ownSyncFileName
         let docs: [SyncDocument]? = await Task.detached(priority: .utility) {
@@ -91,7 +91,7 @@ extension AppStore {
         }
         // A merge that brought new articles gets the same signals as a fetch
         // that did — unless the popover is open and the user is looking.
-        if !popoverOpen, unreadCount + storeUnreadCount > unreadBefore {
+        if !popoverOpen, unreadCount > unreadBefore {
             hasUnseenArticles = true
             animateMenuBarIcon()
             _ = groupedInbox   // warm the grouping cache off the render path
@@ -251,17 +251,15 @@ extension AppStore {
             }
         }
 
-        // Seen: union, earliest first-seen date wins. This is what keeps a
-        // store product cleared on one Mac from ever resurfacing on another.
+        // Seen: union, earliest first-seen date wins. This is what keeps an
+        // article cleared on one Mac from ever resurfacing on another.
         // Entries sweep() would immediately prune are not adopted — otherwise
         // a locally-pruned id resurrects from any document that still carries
         // it, and the prune → merge → prune cycle rewrites the sync file (and
         // keeps the cloud client busy) around every entry aging past
-        // retention. Store keys are exempt, mirroring sweep().
-        let storeKeyPrefixes = feeds.filter(\.isStore).map { $0.url.absoluteString + "#" }
+        // retention.
         for (id, date) in doc.seen where date < (seen[id] ?? .distantFuture) {
-            if now.timeIntervalSince(date) >= AppSettings.seenRetention,
-               !storeKeyPrefixes.contains(where: id.hasPrefix) { continue }
+            if now.timeIntervalSince(date) >= AppSettings.seenRetention { continue }
             seen[id] = date
             changed = true
         }

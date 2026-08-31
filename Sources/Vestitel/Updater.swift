@@ -60,7 +60,7 @@ extension AppStore {
         return true
     }
 
-    /// Rides sweep() like the store scan: a one-shot timer aimed at 12:30
+    /// Rides sweep(): a one-shot timer aimed at 12:30
     /// would be missed by sleep or a late launch.
     func maybeRunDailyUpdateCheck() {
         guard settings.autoUpdateEnabled, updaterAvailable, updaterTask == nil else { return }
@@ -158,9 +158,8 @@ extension AppStore {
         }
     }
 
-    /// Swap only while nothing is on screen and no scan is walking pages:
-    /// replacing the app under the user's cursor reads as a crash, and a
-    /// killed scan would have to start over tomorrow.
+    /// Swap only while nothing is on screen: replacing the app under the
+    /// user's cursor reads as a crash.
     func installStagedUpdateIfIdle(force: Bool = false) {
         guard let staged = stagedUpdatePath,
               FileManager.default.fileExists(atPath: staged) else {
@@ -168,7 +167,7 @@ extension AppStore {
             return
         }
         if !force {
-            guard !popoverOpen, storeScanTask == nil else { return }
+            guard !popoverOpen else { return }
         }
         let appPath = Bundle.main.bundleURL.path
         let pid = ProcessInfo.processInfo.processIdentifier
