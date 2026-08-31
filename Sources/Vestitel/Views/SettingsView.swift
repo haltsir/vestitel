@@ -21,9 +21,13 @@ struct SettingsView: View {
                 Divider()
                 behaviorSection
                 Divider()
+                storeScanSection
+                Divider()
                 syncSection
                 Divider()
                 importExportSection
+                Divider()
+                aboutSection
             }
             .padding(14)
         }
@@ -109,7 +113,7 @@ struct SettingsView: View {
             // re-check: the user may have started typing while we verified
             guard newFeedURL.isEmpty else { return }
             newFeedURL = raw
-            clipboardHint = "Feed URL taken from your clipboard — press Add to subscribe."
+            clipboardHint = "Feed URL taken from your clipboard. Press Add to subscribe."
         }
     }
 
@@ -236,6 +240,43 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: Latest-additions scan
+
+    private var storeScanSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("\(StoreScan.siteName) Latest Additions")
+
+            SettingRow(
+                title: "Scan the whole listing daily",
+                subtitle: scanSubtitle,
+                onTap: { store.settings.storeScanEnabled.toggle() }
+            ) {
+                Toggle("", isOn: $store.settings.storeScanEnabled)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+            }
+
+            Text("The \"latest additions\" page doesn't reliably order products by when they appeared: something added today can sit ten pages deep. The scan therefore walks every page, pausing several seconds between requests so the site doesn't take it for a crawler; a full pass takes a few minutes. Results don't enter the Store inbox: when the scan finishes you get a notification whose Open Report button builds a temporary HTML page of everything new. Run one ad-hoc from the Store tab.")
+                .font(.system(size: 11.5))
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private var scanSubtitle: String {
+        guard store.settings.storeScanEnabled else {
+            return "Off. Turning it on records a baseline right away, then scans every day at \(String(format: "%d:%02d", StoreScan.dailyHour, StoreScan.dailyMinute))."
+        }
+        if let progress = store.storeScanProgress {
+            return progress.page == 0
+                ? "Scanning…"
+                : "Scanning page \(progress.page) of \(progress.pageCount), \(progress.found) products so far."
+        }
+        if let next = store.nextStoreScanDate {
+            return "Next scan \(next.articleDisplay)."
+        }
+        return "Runs daily at \(String(format: "%d:%02d", StoreScan.dailyHour, StoreScan.dailyMinute))."
+    }
+
     // MARK: Sync between Macs
 
     private var syncSection: some View {
@@ -298,7 +339,7 @@ struct SettingsView: View {
         panel.canChooseDirectories = true
         panel.canCreateDirectories = true
         panel.prompt = "Use This Folder"
-        panel.message = "Choose a synced folder — pick the same one on every Mac."
+        panel.message = "Choose a synced folder, and pick the same one on every Mac."
         if store.settings.syncFolderPath == nil, let root = defaultCloudRoot {
             panel.directoryURL = root
         }
@@ -349,6 +390,37 @@ struct SettingsView: View {
             Text("Exports feeds and preferences as JSON. Importing merges feeds with your current list.")
                 .font(.system(size: 11.5))
                 .foregroundStyle(.tertiary)
+        }
+    }
+
+    // MARK: About
+
+    private var aboutSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("About")
+            HStack(spacing: 6) {
+                Text("Vestitel")
+                    .font(.system(size: 13, weight: .medium))
+                Text("Version \(Self.appVersion)")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+
+    /// Reads the marketing version from Info.plist; shows the build number too
+    /// when it differs (they are kept equal by the release process, so normally
+    /// only the version appears).
+    static var appVersion: String {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let short = info["CFBundleShortVersionString"] as? String
+        let build = info["CFBundleVersion"] as? String
+        switch (short, build) {
+        case let (s?, b?) where s != b: return "\(s) (\(b))"
+        case let (s?, _): return s
+        case let (nil, b?): return b
+        default: return "unknown"
         }
     }
 
@@ -544,7 +616,7 @@ struct FeedRowView: View {
             }
         } label: {
             // favicon when the site has one; coloured swatch otherwise.
-            // (Menu labels only render NSImages, at intrinsic size — so the
+            // (Menu labels only render NSImages, at intrinsic size, so the
             // favicon must be pre-resized, not framed.)
             if let host = feed.url.host, let icon = favicons.menuIcon(for: host) {
                 Image(nsImage: icon)

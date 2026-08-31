@@ -119,8 +119,10 @@ struct ContentView: View {
                 }
             }
 
-            // The Store tab only exists while a store-watch feed is added.
-            let tabs = store.hasStoreFeeds ? Tab.allCases : Tab.allCases.filter { $0 != .store }
+            // The Store tab only exists while there is something store-ish to
+            // show: a store-watch feed, or the latest-additions scan.
+            let showsStore = store.showsStoreTab
+            let tabs = showsStore ? Tab.allCases : Tab.allCases.filter { $0 != .store }
             Picker("", selection: $tab) {
                 ForEach(tabs, id: \.self) { t in
                     Text(t.rawValue).tag(t)
@@ -129,8 +131,8 @@ struct ContentView: View {
             .pickerStyle(.segmented)
             .controlSize(.large)
             .labelsHidden()
-            .onChange(of: store.hasStoreFeeds) { _, has in
-                if !has, tab == .store { tab = .inbox }
+            .onChange(of: showsStore) { _, shows in
+                if !shows, tab == .store { tab = .inbox }
             }
         }
         .padding(.horizontal, 14)

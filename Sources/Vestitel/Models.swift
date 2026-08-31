@@ -97,6 +97,10 @@ struct AppSettings: Codable {
     /// Drive etc.); nil = sync off. Each machine writes only its own
     /// vestitel-<machineID>.json there and merges the others'.
     var syncFolderPath: String? = nil
+    /// Walk every page of the Ozone "latest additions" listing once a day at
+    /// StoreScan.dailyHour:dailyMinute and report what wasn't there before.
+    /// Off by default — the scan makes dozens of slow requests.
+    var storeScanEnabled: Bool = false
 
     init() {}
 
@@ -111,6 +115,7 @@ struct AppSettings: Codable {
         allowColoredIcon = try c.decodeIfPresent(Bool.self, forKey: .allowColoredIcon) ?? true
         compactRows = try c.decodeIfPresent(Bool.self, forKey: .compactRows) ?? false
         syncFolderPath = try c.decodeIfPresent(String.self, forKey: .syncFolderPath)
+        storeScanEnabled = try c.decodeIfPresent(Bool.self, forKey: .storeScanEnabled) ?? false
     }
 
     static let readClearInterval: TimeInterval = 15 * 60       // 15 minutes

@@ -42,11 +42,40 @@ enum StorePageParser {
         pattern: "<title>([^<]*)</title>",
         options: [.caseInsensitive]
     )
+    // Pager links carry the page number as ?p=N. The "last" link is the
+    // authoritative page count; the numbered links are the fallback.
+    private static let pagerLink = try! NSRegularExpression(
+        pattern: "href=\"[^\"]*[?&]p=([0-9]{1,5})\"",
+        options: [.caseInsensitive]
+    )
+
+    /// One listing page: its products plus how many pages the pager spans
+    /// (1 when the listing isn't paginated).
+    struct ListingPage {
+        var feed: ParsedFeed
+        var pageCount: Int
+    }
 
     static func parse(data: Data, pageURL: URL) throws -> ParsedFeed {
-        guard let html = String(data: data, encoding: .utf8)
+        try parseListing(data: data, pageURL: pageURL).feed
+    }
+
+    static func parseListing(data: Data, pageURL: URL) throws -> ListingPage {
+        guard let document = String(data: data, encoding: .utf8)
                 ?? String(data: data, encoding: .isoLatin1) else {
             throw ParseError.notAStorePage
+        }
+
+        // The result grid is <div class="row products-list" id="products-list">;
+        // everything before it is recommendation carousels ("brands widget",
+        // "recently viewed") whose cards use the same product-box markup but
+        // are not listing results. Scope products to the grid when the marker
+        // is there, and keep the full document for <title> and the pager.
+        let html: String
+        if let marker = document.range(of: "id=\"products-list\"") {
+            html = String(document[marker.lowerBound...])
+        } else {
+            html = document
         }
 
         let matches = productAnchor.matches(in: html, range: NSRange(html.startIndex..., in: html))
@@ -97,11 +126,25 @@ enum StorePageParser {
 
         guard !items.isEmpty else { throw ParseError.notAStorePage }
 
-        var feedTitle = FeedParser.cleanHTML(first(pageTitle, in: html) ?? "")
+        var feedTitle = FeedParser.cleanHTML(first(pageTitle, in: document) ?? "")
         if let bar = feedTitle.firstIndex(of: "|") {
             feedTitle = String(feedTitle[..<bar]).trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        return ParsedFeed(title: feedTitle, items: items)
+        return ListingPage(
+            feed: ParsedFeed(title: feedTitle, items: items),
+            pageCount: pageCount(in: document)
+        )
+    }
+
+    /// Highest page number the pager links to. Unpaginated listings have no
+    /// pager links at all and count as a single page.
+    private static func pageCount(in html: String) -> Int {
+        var highest = 1
+        for m in pagerLink.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
+            guard let r = Range(m.range(at: 1), in: html), let n = Int(html[r]) else { continue }
+            highest = max(highest, n)
+        }
+        return highest
     }
 
     private static func first(_ regex: NSRegularExpression, in s: String) -> String? {

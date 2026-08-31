@@ -64,9 +64,26 @@ final class AppStore: ObservableObject {
     /// Last written sync payload (updatedAt zeroed) — skip no-op writes.
     var lastSyncPayload: Data? = nil
 
+    // MARK: Store scan state (see StoreScanner.swift)
+
+    /// Non-nil while the listing scan is walking pages.
+    @Published var storeScanProgress: StoreScanProgress? = nil
+    /// The last completed scan, kept so its report stays openable (from the
+    /// notification, or the button) across restarts.
+    @Published var lastStoreScanResult: StoreScanResult? = nil
+    /// Product URL -> when the scan first saw it. This is what makes a
+    /// product "new"; see StoreScan.seenRetention for how it is pruned.
+    var storeScanSeen: [String: Date] = [:]
+    /// True once a scan has walked the whole listing at least once.
+    var storeScanBaselineDone = false
+    /// When a scan was last started (successful or not) — the daily trigger
+    /// uses it to know today is done.
+    var lastStoreScanAttempt: Date? = nil
+    var storeScanTask: Task<Void, Never>? = nil
+
     private var sweepTimer: Timer?
     private var refreshTimer: Timer?
-    private let session: URLSession = {
+    let session: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 20
         config.httpAdditionalHeaders = ["User-Agent": "Vestitel/1.0 (macOS RSS reader)"]
@@ -83,6 +100,12 @@ final class AppStore: ObservableObject {
 
     var hasStoreFeeds: Bool {
         feeds.contains(where: \.isStore)
+    }
+
+    /// The Store tab exists while there is something store-ish to show:
+    /// a store-watch feed, or the latest-additions scan.
+    var showsStoreTab: Bool {
+        hasStoreFeeds || settings.storeScanEnabled
     }
 
     // MARK: Inbox hold (list stability while reading)
@@ -200,6 +223,11 @@ final class AppStore: ObservableObject {
     init() {
         NotificationManager.shared.setup()
         load()
+        // The scan notification's "Open Report" button re-renders the report
+        // from the last result rather than pointing at a stored file.
+        NotificationManager.shared.onOpenStoreScanReport = { [weak self] in
+            self?.openStoreScanReport()
+        }
         sweep()
         sweepTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.sweep() }
@@ -488,7 +516,7 @@ final class AppStore: ObservableObject {
     /// True when a response is a bot-protection page rather than content:
     /// an explicit Cloudflare challenge header, or a block-ish status code
     /// carrying HTML where a feed should be.
-    nonisolated private static func looksBlocked(response: URLResponse?, data: Data) -> Bool {
+    nonisolated static func looksBlocked(response: URLResponse?, data: Data) -> Bool {
         guard let http = response as? HTTPURLResponse else { return false }
         if http.value(forHTTPHeaderField: "cf-mitigated") != nil { return true }
         guard [401, 403, 429, 503].contains(http.statusCode) else { return false }
@@ -741,6 +769,10 @@ final class AppStore: ObservableObject {
         if seen.count != seenCount { changed = true }
 
         if changed { save() }
+
+        // The daily listing scan rides this timer instead of a one-shot timer
+        // aimed at 08:30, which sleep or a late launch would silently miss.
+        maybeRunDailyStoreScan()
     }
 
     /// Minutes until a read article auto-clears; nil if unread.
@@ -795,6 +827,12 @@ final class AppStore: ObservableObject {
         var removedFeeds: [String: Date]?
         var removedBookmarks: [String: Date]?
         var archiveClearedAt: Date?
+        // store scan additions — optional, older state files predate them.
+        // Per-machine on purpose: the scan is not part of the sync document.
+        var storeScanSeen: [String: Date]?
+        var storeScanBaselineDone: Bool?
+        var lastStoreScanAttempt: Date?
+        var lastStoreScanResult: StoreScanResult?
     }
 
     private static var stateURL: URL {
@@ -819,7 +857,9 @@ final class AppStore: ObservableObject {
             feeds: feeds, articles: articles, archive: archive,
             bookmarks: bookmarks, settings: settings, seen: seen,
             machineID: machineID, removedFeeds: removedFeeds,
-            removedBookmarks: removedBookmarks, archiveClearedAt: archiveClearedAt
+            removedBookmarks: removedBookmarks, archiveClearedAt: archiveClearedAt,
+            storeScanSeen: storeScanSeen, storeScanBaselineDone: storeScanBaselineDone,
+            lastStoreScanAttempt: lastStoreScanAttempt, lastStoreScanResult: lastStoreScanResult
         )
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -843,6 +883,10 @@ final class AppStore: ObservableObject {
         removedFeeds = state.removedFeeds ?? [:]
         removedBookmarks = state.removedBookmarks ?? [:]
         archiveClearedAt = state.archiveClearedAt
+        storeScanSeen = state.storeScanSeen ?? [:]
+        storeScanBaselineDone = state.storeScanBaselineDone ?? false
+        lastStoreScanAttempt = state.lastStoreScanAttempt
+        lastStoreScanResult = state.lastStoreScanResult
         // last: its didSet fires save() → writeSyncDocument(), which must see
         // the fully loaded state (machineID above all)
         settings = state.settings
