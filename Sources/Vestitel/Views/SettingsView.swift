@@ -14,6 +14,10 @@ struct SettingsView: View {
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var launchAtLoginError: String?
     @State private var newMutedKeyword = ""
+    /// The smart inbox being edited (nil = editor closed); `smartInboxIsNew`
+    /// decides whether Save appends or replaces.
+    @State private var editingSmartInbox: SmartInbox? = nil
+    @State private var smartInboxIsNew = false
 
     var body: some View {
         ScrollView {
@@ -23,6 +27,8 @@ struct SettingsView: View {
                 behaviorSection
                 Divider()
                 mutedKeywordsSection
+                Divider()
+                smartInboxesSection
                 Divider()
                 syncSection
                 Divider()
@@ -285,6 +291,63 @@ struct SettingsView: View {
     private func addMutedKeyword() {
         store.addMutedKeyword(newMutedKeyword)
         newMutedKeyword = ""
+    }
+
+    // MARK: Smart inboxes
+
+    private var smartInboxesSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("Smart Inboxes")
+
+            if store.settings.smartInboxes.isEmpty && editingSmartInbox == nil {
+                Text("No smart inboxes yet.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.tertiary)
+            } else if !store.settings.smartInboxes.isEmpty {
+                VStack(spacing: 0) {
+                    ForEach(Array(store.settings.smartInboxes.enumerated()), id: \.element.id) { index, inbox in
+                        SmartInboxRow(
+                            inbox: inbox,
+                            isFirst: index == 0,
+                            isLast: index == store.settings.smartInboxes.count - 1,
+                            onEdit: {
+                                editingSmartInbox = inbox
+                                smartInboxIsNew = false
+                            }
+                        )
+                        if index < store.settings.smartInboxes.count - 1 {
+                            Divider().padding(.leading, 12)
+                        }
+                    }
+                }
+                .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
+            }
+
+            if let editing = editingSmartInbox {
+                SmartInboxEditor(
+                    draft: editing,
+                    isNew: smartInboxIsNew,
+                    onSave: { inbox in
+                        if smartInboxIsNew { store.addSmartInbox(inbox) } else { store.updateSmartInbox(inbox) }
+                        editingSmartInbox = nil
+                    },
+                    onCancel: { editingSmartInbox = nil }
+                )
+            } else {
+                Button {
+                    editingSmartInbox = SmartInbox(name: "")
+                    smartInboxIsNew = true
+                } label: {
+                    Label("New Smart Inbox", systemImage: "plus")
+                }
+                .buttonStyle(HoverButtonStyle())
+            }
+
+            Text("Smart inboxes are saved views of the Inbox, shown as subtabs at its top in this order; when they don't all fit, the rest go into a More menu, so move the ones you use most to the top. An article belongs to a smart inbox when it comes from one of the chosen sources (or any, if none are chosen) and its title or summary contains the keywords.")
+                .font(.system(size: 11.5))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     // MARK: Sync between Macs
@@ -602,6 +665,157 @@ struct SettingRow<Control: View>: View {
         .onHover { hovering = $0 }
         .onTapGesture { onTap?() }
         .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+struct SmartInboxRow: View {
+    @EnvironmentObject var store: AppStore
+    let inbox: SmartInbox
+    let isFirst: Bool
+    let isLast: Bool
+    let onEdit: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "tray.full")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(inbox.name)
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+                Text(inbox.summary(feedTitles: { url in store.feeds.first { $0.url == url }?.title }))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(2)
+            }
+            Spacer()
+            RowActionButton(icon: "chevron.up", help: "Move up", visible: hovering, disabled: isFirst) {
+                store.moveSmartInbox(inbox, by: -1)
+            }
+            RowActionButton(icon: "chevron.down", help: "Move down", visible: hovering, disabled: isLast) {
+                store.moveSmartInbox(inbox, by: 1)
+            }
+            RowActionButton(icon: "pencil", help: "Edit smart inbox", visible: hovering) {
+                onEdit()
+            }
+            RowActionButton(icon: "trash", tint: .red, help: "Delete smart inbox (articles are not affected)", visible: hovering) {
+                store.removeSmartInbox(inbox)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
+        .background(hovering ? Color.primary.opacity(0.05) : .clear, in: RoundedRectangle(cornerRadius: 8))
+        .onHover { hovering = $0 }
+        .onTapGesture(count: 2) { onEdit() }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+/// Inline form for one smart inbox. Keywords are typed comma-separated;
+/// sources are picked from the feed list through a checkmark menu.
+struct SmartInboxEditor: View {
+    @EnvironmentObject var store: AppStore
+    @State var draft: SmartInbox
+    @State private var keywordText: String
+    let isNew: Bool
+    let onSave: (SmartInbox) -> Void
+    let onCancel: () -> Void
+
+    init(draft: SmartInbox, isNew: Bool, onSave: @escaping (SmartInbox) -> Void, onCancel: @escaping () -> Void) {
+        _draft = State(initialValue: draft)
+        _keywordText = State(initialValue: draft.keywords.joined(separator: ", "))
+        self.isNew = isNew
+        self.onSave = onSave
+        self.onCancel = onCancel
+    }
+
+    private var parsedKeywords: [String] {
+        keywordText.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private var canSave: Bool {
+        !draft.name.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    private var sourcesLabel: String {
+        if draft.sourceURLs.isEmpty { return "Any source" }
+        let names = draft.sourceURLs.compactMap { url in store.feeds.first { $0.url == url }?.title }
+        return names.isEmpty ? "\(draft.sourceURLs.count) sources" : names.joined(separator: ", ")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(isNew ? "New smart inbox" : "Edit smart inbox")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            TextField("Name (e.g. Sports)", text: $draft.name)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 13))
+
+            TextField("Keywords, comma-separated (leave empty for all articles)", text: $keywordText)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 13))
+
+            HStack(spacing: 10) {
+                Picker("", selection: $draft.matchAllKeywords) {
+                    Text("Any keyword").tag(false)
+                    Text("All keywords").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .disabled(parsedKeywords.count < 2)
+
+                Menu {
+                    Button {
+                        draft.sourceURLs = []
+                    } label: {
+                        if draft.sourceURLs.isEmpty { Image(systemName: "checkmark") }
+                        Text("Any source")
+                    }
+                    Divider()
+                    ForEach(store.feeds) { feed in
+                        Button {
+                            if let i = draft.sourceURLs.firstIndex(of: feed.url) {
+                                draft.sourceURLs.remove(at: i)
+                            } else {
+                                draft.sourceURLs.append(feed.url)
+                            }
+                        } label: {
+                            if draft.sourceURLs.contains(feed.url) { Image(systemName: "checkmark") }
+                            Text(feed.title)
+                        }
+                    }
+                } label: {
+                    Label(sourcesLabel, systemImage: "dot.radiowaves.up.forward")
+                        .lineLimit(1)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize(horizontal: false, vertical: true)
+                .help("Limit this smart inbox to particular sources")
+            }
+
+            HStack(spacing: 8) {
+                Button(isNew ? "Add" : "Save") {
+                    var inbox = draft
+                    inbox.name = inbox.name.trimmingCharacters(in: .whitespaces)
+                    inbox.keywords = parsedKeywords
+                    onSave(inbox)
+                }
+                .buttonStyle(HoverButtonStyle(prominent: true))
+                .disabled(!canSave)
+                .keyboardShortcut(.defaultAction)
+                Button("Cancel", action: onCancel)
+                    .buttonStyle(HoverButtonStyle())
+            }
+        }
+        .padding(10)
+        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 

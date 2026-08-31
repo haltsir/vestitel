@@ -81,6 +81,52 @@ struct BookmarkEntry: Identifiable, Codable, Hashable {
     var bookmarkedAt: Date
 }
 
+// MARK: - Smart inbox
+
+/// A user-defined view over the inbox, like Mail's smart mailboxes: an
+/// article belongs when its source is one of `sourceURLs` (or the list is
+/// empty) AND its title/summary contains any (or, with `matchAllKeywords`,
+/// every) keyword (or there are none). Sources are referenced by feed URL,
+/// not id, so exports and the other Mac resolve them.
+struct SmartInbox: Identifiable, Codable, Hashable {
+    var id: UUID = UUID()
+    var name: String
+    var keywords: [String] = []
+    var matchAllKeywords: Bool = false
+    var sourceURLs: [URL] = []
+
+    init(id: UUID = UUID(), name: String, keywords: [String] = [],
+         matchAllKeywords: Bool = false, sourceURLs: [URL] = []) {
+        self.id = id
+        self.name = name
+        self.keywords = keywords
+        self.matchAllKeywords = matchAllKeywords
+        self.sourceURLs = sourceURLs
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? "Smart Inbox"
+        keywords = try c.decodeIfPresent([String].self, forKey: .keywords) ?? []
+        matchAllKeywords = try c.decodeIfPresent(Bool.self, forKey: .matchAllKeywords) ?? false
+        sourceURLs = try c.decodeIfPresent([URL].self, forKey: .sourceURLs) ?? []
+    }
+
+    /// One-line description of the rules, for Settings.
+    func summary(feedTitles: (URL) -> String?) -> String {
+        var parts: [String] = []
+        if !keywords.isEmpty {
+            parts.append((matchAllKeywords ? "all of: " : "any of: ") + keywords.joined(separator: ", "))
+        }
+        if !sourceURLs.isEmpty {
+            let names = sourceURLs.compactMap(feedTitles)
+            parts.append(names.isEmpty ? "\(sourceURLs.count) sources" : "from " + names.joined(separator: ", "))
+        }
+        return parts.isEmpty ? "Everything (no rules yet)" : parts.joined(separator: " · ")
+    }
+}
+
 // MARK: - Topic group
 
 struct TopicGroup: Identifiable {
@@ -115,6 +161,9 @@ struct AppSettings: Codable {
     /// insensitive substring) never reach the Inbox: they are cleared on
     /// arrival, tagged with the keyword, and reviewable in the Cleared tab.
     var mutedKeywords: [String] = []
+    /// User-defined filtered views of the inbox, in display order: the
+    /// first ones get subtabs, the rest go into the "More" menu.
+    var smartInboxes: [SmartInbox] = []
 
     init() {}
 
@@ -131,6 +180,7 @@ struct AppSettings: Codable {
         syncFolderPath = try c.decodeIfPresent(String.self, forKey: .syncFolderPath)
         autoUpdateEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoUpdateEnabled) ?? true
         mutedKeywords = try c.decodeIfPresent([String].self, forKey: .mutedKeywords) ?? []
+        smartInboxes = try c.decodeIfPresent([SmartInbox].self, forKey: .smartInboxes) ?? []
     }
 
     static let readClearInterval: TimeInterval = 15 * 60       // 15 minutes

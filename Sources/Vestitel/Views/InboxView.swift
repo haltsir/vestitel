@@ -4,11 +4,22 @@ struct InboxView: View {
     @EnvironmentObject var store: AppStore
 
     var body: some View {
-        let groups = store.groupedInbox
+        let groups = store.visibleGroupedInbox
+        let selected = store.selectedSmartInbox
 
         VStack(spacing: 0) {
+            if !store.settings.smartInboxes.isEmpty {
+                SmartInboxBar()
+                Divider()
+            }
             if groups.isEmpty {
-                if store.feeds.isEmpty {
+                if let selected {
+                    EmptyStateView(
+                        icon: "line.3.horizontal.decrease.circle",
+                        title: "Nothing in \(selected.name)",
+                        subtitle: "No inbox article matches this smart inbox right now."
+                    )
+                } else if store.feeds.isEmpty {
                     EmptyStateView(
                         icon: "dot.radiowaves.up.forward",
                         title: "No feeds yet",
@@ -50,20 +61,111 @@ struct InboxView: View {
                     .foregroundStyle(.tertiary)
             }
             Spacer()
-            OpenAllButton(count: store.inbox.count) {
-                store.openAll(store.inbox)
+            let visible = store.visibleInbox
+            let scoped = store.selectedSmartInbox != nil
+            OpenAllButton(count: visible.count) {
+                store.openAll(visible)
             }
             Button {
-                store.clearInbox()
+                store.clearVisibleInbox()
             } label: {
-                Label("Clear Inbox", systemImage: "tray.and.arrow.down")
+                Label(scoped ? "Clear Shown" : "Clear Inbox", systemImage: "tray.and.arrow.down")
             }
             .buttonStyle(HoverButtonStyle())
-            .disabled(store.inbox.isEmpty)
-            .help("Move all inbox articles to Cleared (recoverable for 24 hours)")
+            .disabled(visible.isEmpty)
+            .help(scoped
+                  ? "Move the articles in this smart inbox to Cleared (recoverable for 24 hours)"
+                  : "Move all inbox articles to Cleared (recoverable for 24 hours)")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+    }
+}
+
+/// Subtabs for the smart inboxes: "All" first, then as many as fit in
+/// display order, the rest behind a "More" menu. ViewThatFits tries the
+/// widest layout first, so the user's ordering decides what stays visible.
+struct SmartInboxBar: View {
+    @EnvironmentObject var store: AppStore
+
+    var body: some View {
+        let inboxes = store.settings.smartInboxes
+        ViewThatFits(in: .horizontal) {
+            ForEach(Array(stride(from: inboxes.count, through: 0, by: -1)), id: \.self) { visibleCount in
+                strip(visible: Array(inboxes.prefix(visibleCount)), overflow: Array(inboxes.dropFirst(visibleCount)))
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+    }
+
+    private func strip(visible: [SmartInbox], overflow: [SmartInbox]) -> some View {
+        HStack(spacing: 6) {
+            chip(name: "All", count: store.unreadCount, selected: store.selectedSmartInboxID == nil) {
+                store.selectedSmartInboxID = nil
+            }
+            ForEach(visible) { inbox in
+                chip(name: inbox.name, count: store.unreadCount(in: inbox),
+                     selected: store.selectedSmartInboxID == inbox.id) {
+                    store.selectedSmartInboxID = inbox.id
+                }
+            }
+            if !overflow.isEmpty {
+                let overflowSelected = overflow.first { $0.id == store.selectedSmartInboxID }
+                Menu {
+                    ForEach(overflow) { inbox in
+                        Button {
+                            store.selectedSmartInboxID = inbox.id
+                        } label: {
+                            let n = store.unreadCount(in: inbox)
+                            Text(n > 0 ? "\(inbox.name)  (\(n))" : inbox.name)
+                            if inbox.id == store.selectedSmartInboxID { Image(systemName: "checkmark") }
+                        }
+                    }
+                } label: {
+                    chipLabel(name: overflowSelected?.name ?? "More",
+                              count: overflowSelected.map(store.unreadCount(in:)) ?? 0,
+                              selected: overflowSelected != nil, menu: true)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Other smart inboxes (reorder them in Settings to choose which show here)")
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func chip(name: String, count: Int, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            chipLabel(name: name, count: count, selected: selected, menu: false)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func chipLabel(name: String, count: Int, selected: Bool, menu: Bool) -> some View {
+        HStack(spacing: 5) {
+            Text(name)
+                .font(.system(size: 12, weight: selected ? .semibold : .medium))
+                .lineLimit(1)
+            if count > 0 {
+                Text("\(count)")
+                    .font(.system(size: 10, weight: .bold))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(selected ? Color.white.opacity(0.25) : Color.primary.opacity(0.1), in: Capsule())
+            }
+            if menu {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .bold))
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(selected ? Color.accentColor : Color.primary.opacity(0.07), in: Capsule())
+        .foregroundStyle(selected ? Color.white : Color.primary)
+        .contentShape(Capsule())
+        .fixedSize()
     }
 }
 

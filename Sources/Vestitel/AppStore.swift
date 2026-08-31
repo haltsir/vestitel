@@ -23,6 +23,10 @@ final class AppStore: ObservableObject {
         didSet {
             scheduleRefreshTimer()
             if settings.mutedKeywords != oldValue.mutedKeywords { applyMutedKeywords() }
+            if let selected = selectedSmartInboxID,
+               !settings.smartInboxes.contains(where: { $0.id == selected }) {
+                selectedSmartInboxID = nil   // the selected view was deleted
+            }
             save()
             updateSyncFolderWatcher()
         }
@@ -157,6 +161,104 @@ final class AppStore: ObservableObject {
     var filtered: [Article] {
         articles.filter { $0.state == .cleared && $0.isFiltered }
             .sorted { ($0.clearedAt ?? .distantPast) > ($1.clearedAt ?? .distantPast) }
+    }
+
+    // MARK: Smart inboxes
+
+    /// The subtab the Inbox tab is showing; nil = All. In-memory only.
+    @Published var selectedSmartInboxID: UUID? = nil
+
+    var selectedSmartInbox: SmartInbox? {
+        guard let id = selectedSmartInboxID else { return nil }
+        return settings.smartInboxes.first { $0.id == id }
+    }
+
+    private var feedURLByID: [UUID: URL] {
+        Dictionary(feeds.map { ($0.id, $0.url) }, uniquingKeysWith: { a, _ in a })
+    }
+
+    /// Lowercased title + summary, the haystack for keyword rules.
+    private static func searchText(of article: Article) -> String {
+        (article.title + "\n" + (article.summary ?? "")).lowercased()
+    }
+
+    func matches(_ article: Article, _ inbox: SmartInbox) -> Bool {
+        matches(article, inbox, feedURLByID: feedURLByID)
+    }
+
+    private func matches(_ article: Article, _ inbox: SmartInbox, feedURLByID: [UUID: URL]) -> Bool {
+        if !inbox.sourceURLs.isEmpty {
+            guard let url = feedURLByID[article.feedID], inbox.sourceURLs.contains(url) else { return false }
+        }
+        let keywords = inbox.keywords.map { $0.lowercased() }.filter { !$0.isEmpty }
+        guard !keywords.isEmpty else { return true }
+        let text = Self.searchText(of: article)
+        return inbox.matchAllKeywords
+            ? keywords.allSatisfy(text.contains)
+            : keywords.contains(where: text.contains)
+    }
+
+    /// `list` narrowed to a smart inbox; nil passes everything through.
+    func articles(_ list: [Article], in inbox: SmartInbox?) -> [Article] {
+        guard let inbox else { return list }
+        let urls = feedURLByID
+        return list.filter { matches($0, inbox, feedURLByID: urls) }
+    }
+
+    /// What the Inbox tab currently shows (All, or the selected smart inbox).
+    var visibleInbox: [Article] {
+        articles(inbox, in: selectedSmartInbox)
+    }
+
+    /// Topic groups narrowed to the selected smart inbox: groups are built
+    /// once over the whole inbox (that's the expensive part) and members
+    /// that don't match are dropped, so a story stays grouped inside a view.
+    var visibleGroupedInbox: [TopicGroup] {
+        guard let inbox = selectedSmartInbox else { return groupedInbox }
+        let urls = feedURLByID
+        return groupedInbox.compactMap { group in
+            let members = group.articles.filter { matches($0, inbox, feedURLByID: urls) }
+            guard !members.isEmpty else { return nil }
+            return TopicGroup(id: group.id, headline: group.headline, articles: members)
+        }
+    }
+
+    func unreadCount(in inbox: SmartInbox) -> Int {
+        let urls = feedURLByID
+        return self.inbox.lazy.filter { !$0.isRead && self.matches($0, inbox, feedURLByID: urls) }.count
+    }
+
+    /// "Clear Inbox" scoped to what's on screen: with a smart inbox selected
+    /// only its articles go (held ones are already excluded by `inbox`).
+    func clearVisibleInbox() {
+        let ids = Set(visibleInbox.map(\.id))
+        let now = Date()
+        for i in articles.indices where ids.contains(articles[i].id) && articles[i].state == .inbox {
+            articles[i].state = .cleared
+            articles[i].clearedAt = now
+        }
+        save()
+    }
+
+    func addSmartInbox(_ inbox: SmartInbox) {
+        settings.smartInboxes.append(inbox)
+    }
+
+    func updateSmartInbox(_ inbox: SmartInbox) {
+        guard let idx = settings.smartInboxes.firstIndex(where: { $0.id == inbox.id }) else { return }
+        settings.smartInboxes[idx] = inbox
+    }
+
+    func removeSmartInbox(_ inbox: SmartInbox) {
+        settings.smartInboxes.removeAll { $0.id == inbox.id }
+    }
+
+    /// Move one step up (-1) or down (+1) in display order.
+    func moveSmartInbox(_ inbox: SmartInbox, by delta: Int) {
+        guard let idx = settings.smartInboxes.firstIndex(where: { $0.id == inbox.id }) else { return }
+        let target = idx + delta
+        guard settings.smartInboxes.indices.contains(target) else { return }
+        settings.smartInboxes.swapAt(idx, target)
     }
 
     // MARK: Muted keywords
