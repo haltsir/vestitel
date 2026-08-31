@@ -146,7 +146,12 @@ extension AppStore {
         syncWatcher = nil
         guard let folder = syncFolderURL else { return }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        syncWatcher = SyncFolderWatcher(folder: folder, ownFileName: ownSyncFileName) { [weak self] in
+        let ownFile = ownSyncFileName
+        syncWatcher = FolderWatcher(
+            folder: folder,
+            latency: 2.0,   // cloud clients write in bursts
+            isRelevant: { name in name.hasPrefix("vestitel-") && name.hasSuffix(".json") && name != ownFile }
+        ) { [weak self] in
             Task { @MainActor in await self?.syncNow() }
         }
     }
@@ -308,20 +313,24 @@ extension AppStore {
     }
 }
 
-/// FSEvents watcher on the sync folder: fires when the cloud client delivers
-/// another machine's document, so merges happen seconds after propagation
-/// instead of at the next refresh or popover open. FSEvents (not a kqueue
-/// DispatchSource on the directory) because cloud clients may rewrite a file
-/// in place, which a directory-level kqueue watch never sees.
-final class SyncFolderWatcher {
+/// FSEvents watcher on a folder: fires when a file the caller cares about
+/// changes, so folder-based transports (the sync folder, the local events
+/// drop folder) react within seconds instead of at the next timer tick.
+/// FSEvents (not a kqueue DispatchSource on the directory) because cloud
+/// clients may rewrite a file in place, which a directory-level kqueue
+/// watch never sees. Our own writes are ignored (kFSEventStreamCreateFlagIgnoreSelf).
+final class FolderWatcher {
     private var stream: FSEventStreamRef?
     private let folderPath: String
-    private let ownFileName: String
+    private let isRelevant: (String) -> Bool
     private let onChange: () -> Void
 
-    init?(folder: URL, ownFileName: String, onChange: @escaping () -> Void) {
+    /// `isRelevant` is asked per changed file name. `latency` is the FSEvents
+    /// coalescing window in seconds.
+    init?(folder: URL, latency: TimeInterval, isRelevant: @escaping (String) -> Bool,
+          onChange: @escaping () -> Void) {
         self.folderPath = (folder.path as NSString).standardizingPath
-        self.ownFileName = ownFileName
+        self.isRelevant = isRelevant
         self.onChange = onChange
 
         var context = FSEventStreamContext(
@@ -331,7 +340,7 @@ final class SyncFolderWatcher {
         )
         let callback: FSEventStreamCallback = { _, info, _, eventPaths, _, _ in
             guard let info else { return }
-            let watcher = Unmanaged<SyncFolderWatcher>.fromOpaque(info).takeUnretainedValue()
+            let watcher = Unmanaged<FolderWatcher>.fromOpaque(info).takeUnretainedValue()
             let paths = Unmanaged<NSArray>.fromOpaque(eventPaths).takeUnretainedValue() as? [String] ?? []
             watcher.handle(paths: paths)
         }
@@ -339,7 +348,7 @@ final class SyncFolderWatcher {
             nil, callback, &context,
             [folder.path] as CFArray,
             FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
-            2.0,   // coalescing latency: cloud clients write in bursts
+            latency,
             FSEventStreamCreateFlags(
                 kFSEventStreamCreateFlagUseCFTypes
                     | kFSEventStreamCreateFlagFileEvents
@@ -353,13 +362,10 @@ final class SyncFolderWatcher {
 
     private func handle(paths: [String]) {
         let relevant = paths.contains { path in
-            let name = (path as NSString).lastPathComponent
-            if name.hasPrefix("vestitel-") && name.hasSuffix(".json") {
-                return name != ownFileName
-            }
             // An event-queue overflow reports the folder itself with
-            // "must scan subdirs" — treat it as "something may have changed".
-            return (path as NSString).standardizingPath == folderPath
+            // "must scan subdirs": treat it as "something may have changed".
+            if (path as NSString).standardizingPath == folderPath { return true }
+            return isRelevant((path as NSString).lastPathComponent)
         }
         if relevant { onChange() }
     }

@@ -8,6 +8,12 @@ enum FeedKind: String, Codable {
     /// category pages). Products land in the separate Store inbox, and their
     /// `seen` entries are kept forever so a cleared product never reappears.
     case store
+    /// A source that lives on this Mac: another app or a script posting
+    /// "things that happened" through the events drop folder or the
+    /// vestitel:// URL scheme (see LocalSources.swift). Never fetched; its
+    /// URL is a synthetic vestitel://source/<slug> that only serves as a
+    /// stable identity (article ids, sync matching, colour).
+    case local
 }
 
 struct Feed: Identifiable, Codable, Hashable {
@@ -23,6 +29,11 @@ struct Feed: Identifiable, Codable, Hashable {
     var kind: FeedKind? = nil
 
     var isStore: Bool { kind == .store }
+    var isLocal: Bool { kind == .local }
+
+    /// Host to look a favicon up for; nil when the feed has no site (local
+    /// sources would otherwise resolve to the synthetic URL's host).
+    var faviconHost: String? { isLocal ? nil : url.host }
 }
 
 // MARK: - Article

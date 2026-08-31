@@ -14,6 +14,17 @@
 	<string>Vestitel</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>Vestitel event</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>vestitel</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleShortVersionString</key>
 	<string>1.5</string>
 	<key>CFBundleVersion</key>

@@ -19,6 +19,9 @@ lives in a popover under a menu bar icon (the icon shows your unread count).
 - **Archive** — a permanent record of every article you've opened.
 - **Import/Export settings** — feeds + preferences as JSON, from Settings.
 - **Start at login** — optional toggle in Settings (registers a login item).
+- **Local sources**: other apps and scripts on the Mac can post "things that
+  happened" into the Inbox through a drop folder or a `vestitel://add` URL.
+  See [docs/local-sources.md](docs/local-sources.md).
 
 ## Build & run
 
@@ -32,6 +35,14 @@ make icon  # regenerates Resources/AppIcon.icns from Tools/make-icon.swift
 
 To launch at login, enable **"Start Vestitel at login"** in the app's Settings
 tab (uses `SMAppService`; also visible under System Settings → Login Items).
+
+## Sending things to Vestitel from other apps
+
+Any app or script on the Mac can post an event into the Inbox, either by
+dropping a JSON file into `~/Library/Application Support/Vestitel/Events/` or
+by opening a `vestitel://add?source=…&title=…` URL. The full guide, with the
+event format and shell/Swift examples, is in
+[docs/local-sources.md](docs/local-sources.md).
 
 ## Where data lives
 

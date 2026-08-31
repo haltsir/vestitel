@@ -25,6 +25,8 @@ struct SettingsView: View {
                 Divider()
                 syncSection
                 Divider()
+                localSourcesSection
+                Divider()
                 importExportSection
                 Divider()
                 aboutSection
@@ -393,6 +395,83 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: Local sources
+
+    private static let exampleEventJSON =
+        #"{"source": "Ozonko", "title": "Kindle back in stock", "url": "https://example.com/kindle"}"#
+    private static let exampleAddURL = LocalEvent.addURL(
+        source: "Ozonko", title: "Kindle back in stock", url: "https://example.com/kindle"
+    )?.absoluteString ?? ""
+
+    private var localSourcesSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("Local Sources")
+
+            Text("Other apps and scripts on this Mac can post things that happened. Each source name becomes a feed in the list above, and its events show up in the Inbox like articles.")
+                .font(.system(size: 11.5))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Drop a JSON file (one event, or an array) into:")
+                    .font(.system(size: 12))
+                Text(AppStore.eventsFolderURL.path)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                Text(Self.exampleEventJSON)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    store.revealEventsFolder()
+                } label: {
+                    Label("Show in Finder", systemImage: "folder")
+                }
+                .buttonStyle(HoverButtonStyle())
+                Button {
+                    copyToClipboard(AppStore.eventsFolderURL.path)
+                } label: {
+                    Label("Copy Path", systemImage: "doc.on.doc")
+                }
+                .buttonStyle(HoverButtonStyle())
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Or open a URL (from any app, or `open` in a shell):")
+                    .font(.system(size: 12))
+                Text(Self.exampleAddURL)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Button {
+                copyToClipboard(Self.exampleAddURL)
+            } label: {
+                Label("Copy Example URL", systemImage: "link")
+            }
+            .buttonStyle(HoverButtonStyle())
+
+            Text("Required: source, title. Optional: url, summary, image, published (ISO 8601 or Unix seconds), id (deduplication key; defaults to the url, then the title). Processed files are deleted; files that don't parse are moved to Events/Rejected. Write files atomically (write elsewhere, then move) so they aren't read half-written.")
+                .font(.system(size: 11.5))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func copyToClipboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
     // MARK: About
 
     private var aboutSection: some View {
@@ -537,6 +616,15 @@ struct FeedRowView: View {
                                 .foregroundStyle(Color.accentColor)
                                 .help("Store watch: new products land in the Store tab; cleared products never reappear")
                         }
+                        if feed.isLocal {
+                            Text("LOCAL")
+                                .font(.system(size: 9, weight: .bold))
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1.5)
+                                .background(Color.accentColor.opacity(0.15), in: Capsule())
+                                .foregroundStyle(Color.accentColor)
+                                .help("Local source: another app on this Mac posts events here (see Local Sources below)")
+                        }
                     }
                 }
                 Text(feed.url.absoluteString)
@@ -551,7 +639,9 @@ struct FeedRowView: View {
                 }
             }
             Spacer()
-            if store.refreshingFeedIDs.contains(feed.id) {
+            if feed.isLocal {
+                // nothing to fetch: events are pushed in by the producer
+            } else if store.refreshingFeedIDs.contains(feed.id) {
                 ProgressView()
                     .controlSize(.small)
                     .frame(width: 26, height: 26)
@@ -618,7 +708,7 @@ struct FeedRowView: View {
             // favicon when the site has one; coloured swatch otherwise.
             // (Menu labels only render NSImages, at intrinsic size, so the
             // favicon must be pre-resized, not framed.)
-            if let host = feed.url.host, let icon = favicons.menuIcon(for: host) {
+            if let host = feed.faviconHost, let icon = favicons.menuIcon(for: host) {
                 Image(nsImage: icon)
             } else {
                 Image(nsImage: SourcePalette.swatchImage(at: store.resolvedColorIndex(feed)))
@@ -629,7 +719,7 @@ struct FeedRowView: View {
         .fixedSize()
         .help("Source colour (used when the site has no icon)")
         .onAppear {
-            if let host = feed.url.host {
+            if let host = feed.faviconHost {
                 FaviconStore.shared.load(host: host)
             }
         }

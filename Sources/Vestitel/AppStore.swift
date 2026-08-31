@@ -54,7 +54,9 @@ final class AppStore: ObservableObject {
     /// A sync trigger arrived while one was running — run once more after.
     var syncQueued = false
     /// FSEvents watcher on the sync folder (see SyncEngine.swift).
-    var syncWatcher: SyncFolderWatcher? = nil
+    var syncWatcher: FolderWatcher? = nil
+    /// FSEvents watcher on the local events drop folder (see LocalSources.swift).
+    var eventsWatcher: FolderWatcher? = nil
     /// Path the current watcher observes, so settings.didSet (which fires on
     /// every settings mutation) only rebuilds it when the path changes.
     var watchedSyncFolderPath: String? = nil
@@ -228,6 +230,13 @@ final class AppStore: ObservableObject {
         NotificationManager.shared.onOpenStoreScanReport = { [weak self] in
             self?.openStoreScanReport()
         }
+        // Local sources: files already waiting in the drop folder, then
+        // whatever arrives later (folder watcher, vestitel:// URLs).
+        startLocalEventsWatcher()
+        ingestLocalEventFiles()
+        OpenURLQueue.shared.handler = { [weak self] urls in
+            self?.handleOpenURLs(urls)
+        }
         sweep()
         sweepTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.sweep() }
@@ -367,7 +376,7 @@ final class AppStore: ObservableObject {
     /// Host of the feed a source label belongs to, for favicon lookup.
     func sourceHost(feedID: UUID? = nil, title: String) -> String? {
         (feeds.first(where: { $0.id == feedID })
-            ?? feeds.first(where: { $0.title == title }))?.url.host
+            ?? feeds.first(where: { $0.title == title }))?.faviconHost
     }
 
     func setFeedColor(_ feed: Feed, to index: Int?) {
@@ -465,8 +474,12 @@ final class AppStore: ObservableObject {
         }
 
         var newCount = 0
+        // A refresh is also a good moment to sweep the events drop folder,
+        // in case the folder watcher missed something.
+        newCount += ingestLocalEventFiles()
         await withTaskGroup(of: (UUID, Result<ParsedFeed, Error>).self) { group in
-            for feed in feeds {
+            // local sources are never fetched: their content is pushed in
+            for feed in feeds where !feed.isLocal {
                 group.addTask {
                     (feed.id, await self.fetchParsed(for: feed))
                 }
@@ -489,7 +502,7 @@ final class AppStore: ObservableObject {
     /// Settings (retry a blocked feed, pull a listing without waiting for
     /// the timer). Same ingest semantics as a timed refresh.
     func refreshFeed(_ feed: Feed) async {
-        guard !refreshingFeedIDs.contains(feed.id) else { return }
+        guard !feed.isLocal, !refreshingFeedIDs.contains(feed.id) else { return }
         refreshingFeedIDs.insert(feed.id)
         defer { refreshingFeedIDs.remove(feed.id) }
 
@@ -525,13 +538,15 @@ final class AppStore: ObservableObject {
     }
 
     /// Returns how many articles were actually new.
+    /// (internal, not private: LocalSources ingests through it)
     @discardableResult
-    private func ingest(_ items: [ParsedItem], into feed: Feed) -> Int {
+    func ingest(_ items: [ParsedItem], into feed: Feed) -> Int {
         let now = Date()
         var added = 0
         // Store listings aren't capped: the page itself bounds the count, and
-        // truncating would silently drop products from the watch.
-        let cap = feed.isStore ? items.count : settings.maxArticlesPerFeed
+        // truncating would silently drop products from the watch. Local
+        // sources neither: every posted event was posted on purpose.
+        let cap = feed.isStore || feed.isLocal ? items.count : settings.maxArticlesPerFeed
         for item in items.prefix(cap) {
             let key = item.guid ?? item.link?.absoluteString ?? item.title
             let id = "\(feed.url.absoluteString)#\(key)"
@@ -835,12 +850,13 @@ final class AppStore: ObservableObject {
         var lastStoreScanResult: StoreScanResult?
     }
 
-    private static var stateURL: URL {
-        // VESTITEL_STATE_DIR points a throwaway instance at its own state so
-        // it can run alongside the real app. Overriding $HOME does NOT work:
-        // FileManager resolves Application Support from the user record, so
-        // without this a "sandboxed" second instance silently shares (and
-        // fights over) the real state file.
+    /// Application Support/Vestitel (also home to the local events drop
+    /// folder). VESTITEL_STATE_DIR points a throwaway instance at its own
+    /// state so it can run alongside the real app. Overriding $HOME does NOT
+    /// work: FileManager resolves Application Support from the user record,
+    /// so without this a "sandboxed" second instance silently shares (and
+    /// fights over) the real state file.
+    static var stateDirectory: URL {
         let dir: URL
         if let override = ProcessInfo.processInfo.environment["VESTITEL_STATE_DIR"], !override.isEmpty {
             dir = URL(fileURLWithPath: override, isDirectory: true)
@@ -849,7 +865,11 @@ final class AppStore: ObservableObject {
                 .appendingPathComponent("Vestitel", isDirectory: true)
         }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("state.json")
+        return dir
+    }
+
+    private static var stateURL: URL {
+        stateDirectory.appendingPathComponent("state.json")
     }
 
     func save() {

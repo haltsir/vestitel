@@ -1,8 +1,18 @@
 import SwiftUI
 import AppKit
 
+/// Receives vestitel:// URLs from LaunchServices (other apps, `open`, shell
+/// scripts) and hands them to the store through OpenURLQueue, which tolerates
+/// the URL arriving before the store exists (app launched by the URL).
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func application(_ application: NSApplication, open urls: [URL]) {
+        OpenURLQueue.shared.enqueue(urls)
+    }
+}
+
 @main
 struct VestitelApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var store = AppStore()
 
     init() {
