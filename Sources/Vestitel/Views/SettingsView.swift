@@ -571,9 +571,14 @@ struct SettingsView: View {
                 title: "Check for updates",
                 subtitle: store.updateStatus.isEmpty ? "Downloads from GitHub releases; only signed builds are installed." : store.updateStatus
             ) {
-                Button("Check Now") { store.startUpdateCheck(manual: true) }
-                    .buttonStyle(HoverButtonStyle())
-                    .disabled(store.updaterTask != nil || !store.updaterAvailable)
+                if store.stagedUpdatePath != nil {
+                    Button("Install Now") { store.installStagedUpdateIfIdle(force: true) }
+                        .buttonStyle(HoverButtonStyle())
+                } else {
+                    Button("Check Now") { store.startUpdateCheck(manual: true) }
+                        .buttonStyle(HoverButtonStyle())
+                        .disabled(store.updaterTask != nil || !store.updaterAvailable)
+                }
             }
         }
     }

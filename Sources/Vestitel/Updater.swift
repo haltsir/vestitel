@@ -63,12 +63,16 @@ extension AppStore {
     /// Rides sweep(): a one-shot timer aimed at 12:30
     /// would be missed by sleep or a late launch.
     func maybeRunDailyUpdateCheck() {
-        guard settings.autoUpdateEnabled, updaterAvailable, updaterTask == nil else { return }
-        // a verified update is staged: swap as soon as the app sits idle
+        guard updaterAvailable, updaterTask == nil else { return }
+        // A verified update is staged: swap as soon as the app sits idle.
+        // Deliberately not gated on autoUpdateEnabled: a manual check can
+        // stage an update while the daily check is off, and it must still
+        // install once the popover closes.
         if stagedUpdatePath != nil {
             installStagedUpdateIfIdle()
             return
         }
+        guard settings.autoUpdateEnabled else { return }
         guard let trigger = Calendar.current.date(
             bySettingHour: Updater.dailyHour, minute: Updater.dailyMinute, second: 0, of: Date()
         ), Date() >= trigger else { return }

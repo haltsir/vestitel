@@ -86,7 +86,7 @@ final class AppStore: ObservableObject {
     var lastRunVersion: String? = nil
     /// A downloaded, verified bundle waiting for an idle moment (in-memory:
     /// the temp dir may not survive a restart, and the next check re-stages).
-    var stagedUpdatePath: String? = nil
+    @Published var stagedUpdatePath: String? = nil
     var stagedUpdateVersion: String? = nil
     var updaterTask: Task<Void, Never>? = nil
 

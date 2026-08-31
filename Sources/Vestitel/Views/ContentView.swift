@@ -44,6 +44,9 @@ struct ContentView: View {
         .onDisappear {
             store.popoverOpen = false
             store.updateInboxHold(active: false)
+            // a staged update installs the moment the popover closes,
+            // instead of waiting for the next sweep tick
+            store.installStagedUpdateIfIdle()
         }
         .onChange(of: tab) { _, newTab in
             store.updateInboxHold(active: store.popoverOpen && newTab == .inbox)
