@@ -83,6 +83,21 @@ final class AppStore: ObservableObject {
     var lastStoreScanAttempt: Date? = nil
     var storeScanTask: Task<Void, Never>? = nil
 
+    // MARK: Updater state (see Updater.swift)
+
+    /// Human-readable progress/result of the last update check, for Settings.
+    @Published var updateStatus = ""
+    /// When a check last started (successful or not): the daily trigger
+    /// uses it to know today is done.
+    var lastUpdateCheck: Date? = nil
+    /// Version that ran last time, so the launch after a swap can notify.
+    var lastRunVersion: String? = nil
+    /// A downloaded, verified bundle waiting for an idle moment (in-memory:
+    /// the temp dir may not survive a restart, and the next check re-stages).
+    var stagedUpdatePath: String? = nil
+    var stagedUpdateVersion: String? = nil
+    var updaterTask: Task<Void, Never>? = nil
+
     private var sweepTimer: Timer?
     private var refreshTimer: Timer?
     let session: URLSession = {
@@ -237,6 +252,7 @@ final class AppStore: ObservableObject {
         OpenURLQueue.shared.handler = { [weak self] urls in
             self?.handleOpenURLs(urls)
         }
+        noteVersionChange()
         sweep()
         sweepTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.sweep() }
@@ -788,6 +804,7 @@ final class AppStore: ObservableObject {
         // The daily listing scan rides this timer instead of a one-shot timer
         // aimed at 08:30, which sleep or a late launch would silently miss.
         maybeRunDailyStoreScan()
+        maybeRunDailyUpdateCheck()
     }
 
     /// Minutes until a read article auto-clears; nil if unread.
@@ -848,6 +865,9 @@ final class AppStore: ObservableObject {
         var storeScanBaselineDone: Bool?
         var lastStoreScanAttempt: Date?
         var lastStoreScanResult: StoreScanResult?
+        // updater additions, optional likewise
+        var lastUpdateCheck: Date?
+        var lastRunVersion: String?
     }
 
     /// Application Support/Vestitel (also home to the local events drop
@@ -879,7 +899,8 @@ final class AppStore: ObservableObject {
             machineID: machineID, removedFeeds: removedFeeds,
             removedBookmarks: removedBookmarks, archiveClearedAt: archiveClearedAt,
             storeScanSeen: storeScanSeen, storeScanBaselineDone: storeScanBaselineDone,
-            lastStoreScanAttempt: lastStoreScanAttempt, lastStoreScanResult: lastStoreScanResult
+            lastStoreScanAttempt: lastStoreScanAttempt, lastStoreScanResult: lastStoreScanResult,
+            lastUpdateCheck: lastUpdateCheck, lastRunVersion: lastRunVersion
         )
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -907,6 +928,8 @@ final class AppStore: ObservableObject {
         storeScanBaselineDone = state.storeScanBaselineDone ?? false
         lastStoreScanAttempt = state.lastStoreScanAttempt
         lastStoreScanResult = state.lastStoreScanResult
+        lastUpdateCheck = state.lastUpdateCheck
+        lastRunVersion = state.lastRunVersion
         // last: its didSet fires save() → writeSyncDocument(), which must see
         // the fully loaded state (machineID above all)
         settings = state.settings

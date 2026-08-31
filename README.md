@@ -19,6 +19,9 @@ lives in a popover under a menu bar icon (the icon shows your unread count).
 - **Archive** — a permanent record of every article you've opened.
 - **Import/Export settings** — feeds + preferences as JSON, from Settings.
 - **Start at login** — optional toggle in Settings (registers a login item).
+- **Automatic updates**: once a day Vestitel checks GitHub releases and, while
+  the popover is closed, installs a newer version whose release zip carries a
+  valid ed25519 signature. Toggle or trigger it from Settings → About.
 - **Local sources**: other apps and scripts on the Mac can post "things that
   happened" into the Inbox through a drop folder or a `vestitel://add` URL.
   See [docs/local-sources.md](docs/local-sources.md).

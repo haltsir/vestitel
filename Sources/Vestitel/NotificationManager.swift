@@ -2,9 +2,9 @@ import Foundation
 import AppKit
 import UserNotifications
 
-/// Local notifications. Two cases: a site started bot-challenging the app's
-/// feed fetches (open it in a browser), and a store listing scan finished
-/// (open its report).
+/// Local notifications. Three cases: a site started bot-challenging the
+/// app's feed fetches (open it in a browser), a store listing scan finished
+/// (open its report), and the app relaunched after a self-update.
 @MainActor
 final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     static let shared = NotificationManager()
@@ -94,6 +94,22 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
             // one visible notification per host: repeats replace, not stack
             UNUserNotificationCenter.current().add(UNNotificationRequest(
                 identifier: "feed-blocked-\(host)",
+                content: content,
+                trigger: nil
+            ))
+        }
+    }
+
+    /// The launch after an update swapped the bundle: one quiet note. No
+    /// category, so tapping it does nothing beyond dismissing.
+    func notifyUpdated(version: String) {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = "Vestitel updated"
+            content.body = "Version \(version) is now installed."
+            UNUserNotificationCenter.current().add(UNNotificationRequest(
+                identifier: "updated",
                 content: content,
                 trigger: nil
             ))

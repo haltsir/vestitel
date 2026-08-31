@@ -485,6 +485,25 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
+
+            SettingRow(
+                title: "Update automatically",
+                subtitle: "Checks GitHub once a day and installs a signed newer version while the popover is closed.",
+                onTap: { store.settings.autoUpdateEnabled.toggle() }
+            ) {
+                Toggle("", isOn: $store.settings.autoUpdateEnabled)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+            }
+
+            SettingRow(
+                title: "Check for updates",
+                subtitle: store.updateStatus.isEmpty ? "Downloads from GitHub releases; only signed builds are installed." : store.updateStatus
+            ) {
+                Button("Check Now") { store.startUpdateCheck(manual: true) }
+                    .buttonStyle(HoverButtonStyle())
+                    .disabled(store.updaterTask != nil || !store.updaterAvailable)
+            }
         }
     }
 

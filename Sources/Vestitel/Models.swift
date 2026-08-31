@@ -112,6 +112,9 @@ struct AppSettings: Codable {
     /// StoreScan.dailyHour:dailyMinute and report what wasn't there before.
     /// Off by default — the scan makes dozens of slow requests.
     var storeScanEnabled: Bool = false
+    /// Check GitHub releases once a day and install a signed newer build
+    /// while the app is idle (see Updater.swift).
+    var autoUpdateEnabled: Bool = true
 
     init() {}
 
@@ -127,6 +130,7 @@ struct AppSettings: Codable {
         compactRows = try c.decodeIfPresent(Bool.self, forKey: .compactRows) ?? false
         syncFolderPath = try c.decodeIfPresent(String.self, forKey: .syncFolderPath)
         storeScanEnabled = try c.decodeIfPresent(Bool.self, forKey: .storeScanEnabled) ?? false
+        autoUpdateEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoUpdateEnabled) ?? true
     }
 
     static let readClearInterval: TimeInterval = 15 * 60       // 15 minutes

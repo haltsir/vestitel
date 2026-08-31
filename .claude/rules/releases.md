@@ -2,6 +2,8 @@
 
 Releases are cut from `main`, tagged `vX.Y.Z`, with an ad-hoc-signed app zip attached. v1.0.0 and v1.1.0 followed this process exactly.
 
+**HARD REQUIREMENT from v1.7.0:** every release MUST carry BOTH the zip AND its `.zip.sig` (ed25519, made by `swift Tools/sign-release.swift <zip>`), or installed apps' self-updaters silently skip the release: they refuse anything unsigned. The signing key lives ONLY at `~/.config/vestitel/release-key` on the release machine and is deliberately not in the repo. Releasing from a machine without that file: stop and ask the user to copy the key over from the other Mac (or, if it is lost, embed a freshly generated public key in `Updater.swift` and tell the user that one release must be installed manually on every machine).
+
 1. **Version bump** — set both version keys in `Resources/Info.plist` (they use two-part versions, e.g. "1.1", even though tags are three-part):
    ```sh
    plutil -replace CFBundleShortVersionString -string "X.Y" Resources/Info.plist
@@ -16,12 +18,18 @@ Releases are cut from `main`, tagged `vX.Y.Z`, with an ad-hoc-signed app zip att
    ```
    Use `ditto` (not `zip -r`); it preserves the resource metadata codesign needs. Zip the asset outside the repo (scratchpad) — it must not be committed.
 
-3. **Publish** — title `Vestitel X.Y.Z`, asset named `Vestitel-X.Y.Z.zip`:
+3. **Sign the zip** (writes `Vestitel-X.Y.Z.zip.sig` next to it):
+   ```sh
+   swift Tools/sign-release.swift Vestitel-X.Y.Z.zip
+   ```
+
+4. **Publish** — title `Vestitel X.Y.Z`, BOTH assets:
    ```sh
    gh release create vX.Y.Z --target main --title "Vestitel X.Y.Z" \
-       --notes-file <notes.md> Vestitel-X.Y.Z.zip#Vestitel-X.Y.Z.zip
+       --notes-file <notes.md> Vestitel-X.Y.Z.zip#Vestitel-X.Y.Z.zip Vestitel-X.Y.Z.zip.sig
    ```
    Write the notes to a file and use `--notes-file`; inline `--notes` with markdown code fences breaks shell quoting.
+   Afterwards relaunch the user's running app on the new build (`pkill -f MacOS/Vestitel; open Vestitel.app`).
 
 ## Release notes format
 
