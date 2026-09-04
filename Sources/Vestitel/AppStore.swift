@@ -27,6 +27,10 @@ final class AppStore: ObservableObject {
                !settings.smartInboxes.contains(where: { $0.id == selected }) {
                 selectedSmartInboxID = nil   // the selected view was deleted
             }
+            if !adoptingSettings,
+               Self.syncableSettings(settings) != Self.syncableSettings(oldValue) {
+                settingsUpdatedAt = Date()
+            }
             save()
             updateSyncFolderWatcher()
         }
@@ -58,6 +62,15 @@ final class AppStore: ObservableObject {
     var removedFeeds: [String: Date] = [:]       // feed URL -> removedAt
     var removedBookmarks: [String: Date] = [:]   // article id -> removedAt
     var archiveClearedAt: Date? = nil
+    /// When the syncable preferences last changed on this machine (or the
+    /// stamp of the remote settings last adopted): last-writer-wins for
+    /// preference sync. Machine-local fields (folder path, syncPreferences)
+    /// never bump it, so enabling sync on a second Mac can't clobber the
+    /// first Mac's setup.
+    var settingsUpdatedAt: Date? = nil
+    /// Set while assigning `settings` from load() or a sync merge, so the
+    /// didSet doesn't stamp settingsUpdatedAt as if the user edited them.
+    var adoptingSettings = false
     @Published var syncStatus: String? = nil
     var syncInFlight = false
     /// A sync trigger arrived while one was running — run once more after.
@@ -187,15 +200,19 @@ final class AppStore: ObservableObject {
     }
 
     private func matches(_ article: Article, _ inbox: SmartInbox, feedURLByID: [UUID: URL]) -> Bool {
-        if !inbox.sourceURLs.isEmpty {
-            guard let url = feedURLByID[article.feedID], inbox.sourceURLs.contains(url) else { return false }
-        }
-        let keywords = inbox.keywords.map { $0.lowercased() }.filter { !$0.isEmpty }
-        guard !keywords.isEmpty else { return true }
+        guard !inbox.filters.isEmpty else { return true }
         let text = Self.searchText(of: article)
-        return inbox.matchAllKeywords
-            ? keywords.allSatisfy(text.contains)
-            : keywords.contains(where: text.contains)
+        return inbox.filters.contains { filter in
+            if !filter.sourceURLs.isEmpty {
+                guard let url = feedURLByID[article.feedID],
+                      filter.sourceURLs.contains(url) else { return false }
+            }
+            let keywords = filter.keywords.map { $0.lowercased() }.filter { !$0.isEmpty }
+            guard !keywords.isEmpty else { return true }
+            return filter.matchAllKeywords
+                ? keywords.allSatisfy(text.contains)
+                : keywords.contains(where: text.contains)
+        }
     }
 
     /// `list` narrowed to a smart inbox; nil passes everything through.
@@ -925,7 +942,11 @@ final class AppStore: ObservableObject {
         guard let doc = try? decoder.decode(SettingsExport.self, from: data) else {
             return "The file is not a valid Vestitel settings export."
         }
-        settings = doc.settings
+        var incoming = doc.settings
+        // machine-local: never taken from another Mac's export
+        incoming.syncFolderPath = settings.syncFolderPath
+        incoming.syncPreferences = settings.syncPreferences
+        settings = incoming
         var added = 0
         for exported in doc.feeds where !feeds.contains(where: { $0.url == exported.url }) {
             feeds.append(Feed(url: exported.url, title: exported.title, colorIndex: exported.colorIndex, kind: exported.kind))
@@ -950,6 +971,7 @@ final class AppStore: ObservableObject {
         var removedFeeds: [String: Date]?
         var removedBookmarks: [String: Date]?
         var archiveClearedAt: Date?
+        var settingsUpdatedAt: Date?
         // updater additions, optional likewise
         var lastUpdateCheck: Date?
         var lastRunVersion: String?
@@ -983,6 +1005,7 @@ final class AppStore: ObservableObject {
             bookmarks: bookmarks, settings: settings, seen: seen,
             machineID: machineID, removedFeeds: removedFeeds,
             removedBookmarks: removedBookmarks, archiveClearedAt: archiveClearedAt,
+            settingsUpdatedAt: settingsUpdatedAt,
             lastUpdateCheck: lastUpdateCheck, lastRunVersion: lastRunVersion
         )
         let encoder = JSONEncoder()
@@ -1009,8 +1032,12 @@ final class AppStore: ObservableObject {
         archiveClearedAt = state.archiveClearedAt
         lastUpdateCheck = state.lastUpdateCheck
         lastRunVersion = state.lastRunVersion
+        settingsUpdatedAt = state.settingsUpdatedAt
         // last: its didSet fires save() → writeSyncDocument(), which must see
-        // the fully loaded state (machineID above all)
+        // the fully loaded state (machineID above all). adoptingSettings:
+        // loading is not a user edit, so it must not re-stamp settingsUpdatedAt.
+        adoptingSettings = true
         settings = state.settings
+        adoptingSettings = false
     }
 }

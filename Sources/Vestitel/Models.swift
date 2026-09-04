@@ -83,22 +83,20 @@ struct BookmarkEntry: Identifiable, Codable, Hashable {
 
 // MARK: - Smart inbox
 
-/// A user-defined view over the inbox, like Mail's smart mailboxes: an
-/// article belongs when its source is one of `sourceURLs` (or the list is
-/// empty) AND its title/summary contains any (or, with `matchAllKeywords`,
-/// every) keyword (or there are none). Sources are referenced by feed URL,
-/// not id, so exports and the other Mac resolve them.
-struct SmartInbox: Identifiable, Codable, Hashable {
+/// One rule of a smart inbox: the article's source must be one of
+/// `sourceURLs` (or the list is empty) AND its title/summary must contain
+/// any (or, with `matchAllKeywords`, every) keyword (or there are none).
+/// Sources are referenced by feed URL, not id, so exports and the other
+/// Mac resolve them.
+struct SmartInboxFilter: Identifiable, Codable, Hashable {
     var id: UUID = UUID()
-    var name: String
     var keywords: [String] = []
     var matchAllKeywords: Bool = false
     var sourceURLs: [URL] = []
 
-    init(id: UUID = UUID(), name: String, keywords: [String] = [],
+    init(id: UUID = UUID(), keywords: [String] = [],
          matchAllKeywords: Bool = false, sourceURLs: [URL] = []) {
         self.id = id
-        self.name = name
         self.keywords = keywords
         self.matchAllKeywords = matchAllKeywords
         self.sourceURLs = sourceURLs
@@ -107,13 +105,15 @@ struct SmartInbox: Identifiable, Codable, Hashable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
-        name = try c.decodeIfPresent(String.self, forKey: .name) ?? "Smart Inbox"
         keywords = try c.decodeIfPresent([String].self, forKey: .keywords) ?? []
         matchAllKeywords = try c.decodeIfPresent(Bool.self, forKey: .matchAllKeywords) ?? false
         sourceURLs = try c.decodeIfPresent([URL].self, forKey: .sourceURLs) ?? []
     }
 
-    /// One-line description of the rules, for Settings.
+    /// No constraints at all (matches everything; dropped on save).
+    var isEmpty: Bool { keywords.isEmpty && sourceURLs.isEmpty }
+
+    /// One-line description of this filter's rules, for Settings.
     func summary(feedTitles: (URL) -> String?) -> String {
         var parts: [String] = []
         if !keywords.isEmpty {
@@ -123,7 +123,51 @@ struct SmartInbox: Identifiable, Codable, Hashable {
             let names = sourceURLs.compactMap(feedTitles)
             parts.append(names.isEmpty ? "\(sourceURLs.count) sources" : "from " + names.joined(separator: ", "))
         }
-        return parts.isEmpty ? "Everything (no rules yet)" : parts.joined(separator: " · ")
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// A user-defined view over the inbox, like Mail's smart mailboxes: an
+/// article belongs when it matches ANY of the `filters` (or there are
+/// none). Repeating a rule kind across filters is the way to OR them:
+/// two source filters mean "from either source".
+struct SmartInbox: Identifiable, Codable, Hashable {
+    var id: UUID = UUID()
+    var name: String
+    var filters: [SmartInboxFilter] = []
+
+    init(id: UUID = UUID(), name: String, filters: [SmartInboxFilter] = []) {
+        self.id = id
+        self.name = name
+        self.filters = filters
+    }
+
+    /// Pre-1.11 files carry one implicit filter's fields at the top level.
+    private enum LegacyKeys: String, CodingKey {
+        case keywords, matchAllKeywords, sourceURLs
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? "Smart Inbox"
+        if let filters = try c.decodeIfPresent([SmartInboxFilter].self, forKey: .filters) {
+            self.filters = filters
+        } else {
+            let l = try decoder.container(keyedBy: LegacyKeys.self)
+            let legacy = SmartInboxFilter(
+                keywords: try l.decodeIfPresent([String].self, forKey: .keywords) ?? [],
+                matchAllKeywords: try l.decodeIfPresent(Bool.self, forKey: .matchAllKeywords) ?? false,
+                sourceURLs: try l.decodeIfPresent([URL].self, forKey: .sourceURLs) ?? []
+            )
+            filters = legacy.isEmpty ? [] : [legacy]
+        }
+    }
+
+    /// One-line description of the rules, for Settings.
+    func summary(feedTitles: (URL) -> String?) -> String {
+        let parts = filters.filter { !$0.isEmpty }.map { $0.summary(feedTitles: feedTitles) }
+        return parts.isEmpty ? "Everything (no rules yet)" : parts.joined(separator: ", or ")
     }
 }
 
@@ -139,7 +183,7 @@ struct TopicGroup: Identifiable {
 
 // MARK: - Settings
 
-struct AppSettings: Codable {
+struct AppSettings: Codable, Equatable {
     var refreshMinutes: Int = 15
     var groupingEnabled: Bool = true
     /// 0...1 — higher groups more aggressively (looser similarity threshold)
@@ -154,6 +198,10 @@ struct AppSettings: Codable {
     /// Drive etc.); nil = sync off. Each machine writes only its own
     /// vestitel-<machineID>.json there and merges the others'.
     var syncFolderPath: String? = nil
+    /// When true (and a sync folder is set) this Mac shares its preferences
+    /// through its sync document and adopts the newest change from other
+    /// Macs that also have this on. Per-machine, like the folder path.
+    var syncPreferences: Bool = false
     /// Check GitHub releases once a day and install a signed newer build
     /// while the app is idle (see Updater.swift).
     var autoUpdateEnabled: Bool = true
@@ -178,6 +226,7 @@ struct AppSettings: Codable {
         allowColoredIcon = try c.decodeIfPresent(Bool.self, forKey: .allowColoredIcon) ?? true
         compactRows = try c.decodeIfPresent(Bool.self, forKey: .compactRows) ?? false
         syncFolderPath = try c.decodeIfPresent(String.self, forKey: .syncFolderPath)
+        syncPreferences = try c.decodeIfPresent(Bool.self, forKey: .syncPreferences) ?? false
         autoUpdateEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoUpdateEnabled) ?? true
         mutedKeywords = try c.decodeIfPresent([String].self, forKey: .mutedKeywords) ?? []
         smartInboxes = try c.decodeIfPresent([SmartInbox].self, forKey: .smartInboxes) ?? []

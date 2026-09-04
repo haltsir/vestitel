@@ -343,7 +343,7 @@ struct SettingsView: View {
                 .buttonStyle(HoverButtonStyle())
             }
 
-            Text("Smart inboxes are saved views of the Inbox, shown as subtabs at its top in this order; when they don't all fit, the rest go into a More menu, so move the ones you use most to the top. An article belongs to a smart inbox when it comes from one of the chosen sources (or any, if none are chosen) and its title or summary contains the keywords.")
+            Text("Smart inboxes are saved views of the Inbox, shown as subtabs at its top in this order; when they don't all fit, the rest go into a More menu, so move the ones you use most to the top. An article belongs to a smart inbox when it matches any of its filters; a filter matches when the article comes from one of its sources (or any, if none are chosen) and its title or summary contains its keywords.")
                 .font(.system(size: 11.5))
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -391,6 +391,16 @@ struct SettingsView: View {
                     }
                 }
                 .buttonStyle(HoverButtonStyle())
+
+                SettingRow(
+                    title: "Sync preferences too",
+                    subtitle: "Smart inboxes, muted keywords and the other preferences follow the newest change from any Mac that has this on. The folder choice stays per-Mac.",
+                    onTap: { store.settings.syncPreferences.toggle() }
+                ) {
+                    Toggle("", isOn: $store.settings.syncPreferences)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
             } else {
                 Button {
                     chooseSyncFolder()
@@ -400,7 +410,7 @@ struct SettingsView: View {
                 .buttonStyle(HoverButtonStyle())
             }
 
-            Text("Pick a cloud-synced folder (e.g. inside Google Drive) and choose the same folder on every Mac. Feeds, read/cleared state, bookmarks and the never-show-again list merge automatically; each Mac writes only its own file, so there are no conflicts. Preferences stay per-Mac.")
+            Text("Pick a cloud-synced folder (e.g. inside Google Drive) and choose the same folder on every Mac. Feeds, read/cleared state, bookmarks and the never-show-again list merge automatically; each Mac writes only its own file, so there are no conflicts. Preferences stay per-Mac unless you turn on preference sync.")
                 .font(.system(size: 11.5))
                 .foregroundStyle(.tertiary)
         }
@@ -718,35 +728,67 @@ struct SmartInboxRow: View {
     }
 }
 
-/// Inline form for one smart inbox. Keywords are typed comma-separated;
-/// sources are picked from the feed list through a checkmark menu.
+/// Inline form for one smart inbox: a name and a list of OR-combined
+/// filters. Keywords are typed comma-separated; sources are picked from
+/// the feed list through a checkmark menu.
 struct SmartInboxEditor: View {
     @EnvironmentObject var store: AppStore
-    @State var draft: SmartInbox
-    @State private var keywordText: String
+
+    /// One filter row being edited (keywords stay free text until save).
+    struct FilterDraft: Identifiable {
+        let id: UUID
+        var keywordText: String
+        var matchAll: Bool
+        var sourceURLs: [URL]
+
+        init(_ filter: SmartInboxFilter) {
+            id = filter.id
+            keywordText = filter.keywords.joined(separator: ", ")
+            matchAll = filter.matchAllKeywords
+            sourceURLs = filter.sourceURLs
+        }
+
+        init() {
+            id = UUID()
+            keywordText = ""
+            matchAll = false
+            sourceURLs = []
+        }
+
+        var parsedKeywords: [String] {
+            keywordText.split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        }
+
+        var filter: SmartInboxFilter {
+            SmartInboxFilter(id: id, keywords: parsedKeywords,
+                             matchAllKeywords: matchAll, sourceURLs: sourceURLs)
+        }
+    }
+
+    @State private var name: String
+    @State private var filterDrafts: [FilterDraft]
+    private let inboxID: UUID
     let isNew: Bool
     let onSave: (SmartInbox) -> Void
     let onCancel: () -> Void
 
     init(draft: SmartInbox, isNew: Bool, onSave: @escaping (SmartInbox) -> Void, onCancel: @escaping () -> Void) {
-        _draft = State(initialValue: draft)
-        _keywordText = State(initialValue: draft.keywords.joined(separator: ", "))
+        _name = State(initialValue: draft.name)
+        let drafts = draft.filters.map(FilterDraft.init)
+        _filterDrafts = State(initialValue: drafts.isEmpty ? [FilterDraft()] : drafts)
+        inboxID = draft.id
         self.isNew = isNew
         self.onSave = onSave
         self.onCancel = onCancel
     }
 
-    private var parsedKeywords: [String] {
-        keywordText.split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-    }
-
     private var canSave: Bool {
-        !draft.name.trimmingCharacters(in: .whitespaces).isEmpty
+        !name.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
-    private var sourcesLabel: String {
+    private func sourcesLabel(_ draft: FilterDraft) -> String {
         if draft.sourceURLs.isEmpty { return "Any source" }
         let names = draft.sourceURLs.compactMap { url in store.feeds.first { $0.url == url }?.title }
         return names.isEmpty ? "\(draft.sourceURLs.count) sources" : names.joined(separator: ", ")
@@ -758,69 +800,108 @@ struct SmartInboxEditor: View {
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.secondary)
 
-            TextField("Name (e.g. Sports)", text: $draft.name)
+            TextField("Name (e.g. Sports)", text: $name)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 13))
 
-            TextField("Keywords, comma-separated (leave empty for all articles)", text: $keywordText)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 13))
-
-            HStack(spacing: 10) {
-                Picker("", selection: $draft.matchAllKeywords) {
-                    Text("Any keyword").tag(false)
-                    Text("All keywords").tag(true)
+            ForEach($filterDrafts) { $draft in
+                if draft.id != filterDrafts.first?.id {
+                    Text("or")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .padding(.leading, 4)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .fixedSize()
-                .disabled(parsedKeywords.count < 2)
-
-                Menu {
-                    Button {
-                        draft.sourceURLs = []
-                    } label: {
-                        if draft.sourceURLs.isEmpty { Image(systemName: "checkmark") }
-                        Text("Any source")
-                    }
-                    Divider()
-                    ForEach(store.feeds) { feed in
-                        Button {
-                            if let i = draft.sourceURLs.firstIndex(of: feed.url) {
-                                draft.sourceURLs.remove(at: i)
-                            } else {
-                                draft.sourceURLs.append(feed.url)
-                            }
-                        } label: {
-                            if draft.sourceURLs.contains(feed.url) { Image(systemName: "checkmark") }
-                            Text(feed.title)
-                        }
-                    }
-                } label: {
-                    Label(sourcesLabel, systemImage: "dot.radiowaves.up.forward")
-                        .lineLimit(1)
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize(horizontal: false, vertical: true)
-                .help("Limit this smart inbox to particular sources")
+                filterBox($draft)
             }
 
             HStack(spacing: 8) {
                 Button(isNew ? "Add" : "Save") {
-                    var inbox = draft
-                    inbox.name = inbox.name.trimmingCharacters(in: .whitespaces)
-                    inbox.keywords = parsedKeywords
-                    onSave(inbox)
+                    onSave(SmartInbox(
+                        id: inboxID,
+                        name: name.trimmingCharacters(in: .whitespaces),
+                        filters: filterDrafts.map(\.filter).filter { !$0.isEmpty }
+                    ))
                 }
                 .buttonStyle(HoverButtonStyle(prominent: true))
                 .disabled(!canSave)
                 .keyboardShortcut(.defaultAction)
                 Button("Cancel", action: onCancel)
                     .buttonStyle(HoverButtonStyle())
+                Spacer()
+                Button {
+                    filterDrafts.append(FilterDraft())
+                } label: {
+                    Label("Add Filter", systemImage: "plus")
+                }
+                .buttonStyle(HoverButtonStyle())
+                .help("Add another filter; an article matches when any filter does")
             }
         }
         .padding(10)
         .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func filterBox(_ draft: Binding<FilterDraft>) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("Keywords, comma-separated (leave empty for all articles)",
+                      text: draft.keywordText)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 13))
+
+            HStack(spacing: 10) {
+                Picker("", selection: draft.matchAll) {
+                    Text("Any keyword").tag(false)
+                    Text("All keywords").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .disabled(draft.wrappedValue.parsedKeywords.count < 2)
+
+                Menu {
+                    Button {
+                        draft.wrappedValue.sourceURLs = []
+                    } label: {
+                        if draft.wrappedValue.sourceURLs.isEmpty { Image(systemName: "checkmark") }
+                        Text("Any source")
+                    }
+                    Divider()
+                    ForEach(store.feeds) { feed in
+                        Button {
+                            if let i = draft.wrappedValue.sourceURLs.firstIndex(of: feed.url) {
+                                draft.wrappedValue.sourceURLs.remove(at: i)
+                            } else {
+                                draft.wrappedValue.sourceURLs.append(feed.url)
+                            }
+                        } label: {
+                            if draft.wrappedValue.sourceURLs.contains(feed.url) { Image(systemName: "checkmark") }
+                            Text(feed.title)
+                        }
+                    }
+                } label: {
+                    Label(sourcesLabel(draft.wrappedValue), systemImage: "dot.radiowaves.up.forward")
+                        .lineLimit(1)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize(horizontal: false, vertical: true)
+                .help("Limit this filter to particular sources")
+
+                Spacer(minLength: 0)
+
+                if filterDrafts.count > 1 {
+                    Button {
+                        filterDrafts.removeAll { $0.id == draft.wrappedValue.id }
+                    } label: {
+                        Image(systemName: "trash")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Remove this filter")
+                }
+            }
+        }
+        .padding(8)
+        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
     }
 }
 

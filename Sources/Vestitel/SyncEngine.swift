@@ -19,6 +19,11 @@ struct SyncDocument: Codable {
     var removedFeeds: [String: Date]       // feed URL -> removedAt
     var removedBookmarks: [String: Date]   // article id -> removedAt
     var archiveClearedAt: Date?
+    /// The writer's preferences and their last-edit stamp; present only
+    /// when that machine has "Sync preferences" on. Among Macs with it on,
+    /// the newest stamp wins (optional, so pre-1.11 documents decode).
+    var settings: AppSettings?
+    var settingsUpdatedAt: Date?
 }
 
 extension AppStore {
@@ -29,6 +34,15 @@ extension AppStore {
     }
 
     private var ownSyncFileName: String { "vestitel-\(machineID).json" }
+
+    /// The preference fields that travel between Macs: everything except
+    /// the machine-local sync wiring itself.
+    static func syncableSettings(_ s: AppSettings) -> AppSettings {
+        var shared = s
+        shared.syncFolderPath = nil
+        shared.syncPreferences = false
+        return shared
+    }
 
     private static func syncEncoder() -> JSONEncoder {
         let encoder = JSONEncoder()
@@ -84,6 +98,7 @@ extension AppStore {
         for doc in docs where mergeSyncDocument(doc) {
             changed = true
         }
+        adoptRemoteSettings(from: docs)
         if changed {
             save()   // save() also rewrites our sync document
         } else {
@@ -100,6 +115,28 @@ extension AppStore {
         syncStatus = docs.isEmpty
             ? "No other Macs found yet · checked \(time)"
             : "Merged \(docs.count) other Mac\(docs.count == 1 ? "" : "s") · \(time)"
+    }
+
+    /// Adopt the newest remote preferences (last writer wins) when this
+    /// Mac has preference sync on. Machine-local fields (the folder path,
+    /// the syncPreferences toggle itself) always keep their local values,
+    /// and adoption re-stamps with the REMOTE date, so merely adopting
+    /// never makes this Mac look like the newest editor.
+    private func adoptRemoteSettings(from docs: [SyncDocument]) {
+        guard settings.syncPreferences else { return }
+        let candidates = docs.compactMap { doc in
+            doc.settings.map { (settings: $0, updatedAt: doc.settingsUpdatedAt ?? .distantPast) }
+        }
+        guard let best = candidates.max(by: { $0.updatedAt < $1.updatedAt }),
+              best.updatedAt > (settingsUpdatedAt ?? .distantPast) else { return }
+        var adopted = best.settings
+        adopted.syncFolderPath = settings.syncFolderPath
+        adopted.syncPreferences = settings.syncPreferences
+        settingsUpdatedAt = best.updatedAt
+        guard adopted != settings else { return }   // stamp caught up; nothing to change
+        adoptingSettings = true
+        settings = adopted   // didSet applies muted keywords, saves, rewrites our doc
+        adoptingSettings = false
     }
 
     /// Write our document if its content changed since the last write.
@@ -122,15 +159,22 @@ extension AppStore {
             feeds: sharedFeeds, articles: articles, seen: seen,
             archive: archive, bookmarks: bookmarks,
             removedFeeds: removedFeeds, removedBookmarks: removedBookmarks,
-            archiveClearedAt: archiveClearedAt
+            archiveClearedAt: archiveClearedAt,
+            settings: settings.syncPreferences ? Self.syncableSettings(settings) : nil,
+            settingsUpdatedAt: settings.syncPreferences ? settingsUpdatedAt : nil
         )
         let encoder = Self.syncEncoder()
         guard let payload = try? encoder.encode(doc), payload != lastSyncPayload else { return }
         doc.updatedAt = Date()
         guard let data = try? encoder.encode(doc) else { return }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        // Written in place, never atomically: an atomic save is a temp file
+        // renamed over the original, which Google Drive sees as delete + new
+        // file and, when it catches one mid-upload, files the orphan under
+        // "Lost & Found". Only we write this file and readers skip a torn
+        // decode, so in-place is safe.
         do {
-            try data.write(to: folder.appendingPathComponent(ownSyncFileName), options: .atomic)
+            try data.write(to: folder.appendingPathComponent(ownSyncFileName))
             lastSyncPayload = payload
         } catch {
             syncStatus = "Couldn't write to the sync folder."
