@@ -281,7 +281,7 @@ struct SettingsView: View {
                 .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
             }
 
-            Text("An article whose title or summary contains a muted keyword (any case) skips the Inbox and goes straight to Cleared, tagged with the keyword. Adding a keyword also clears matching articles already in the Inbox; removing it brings back the ones it caught. Review the catch under Cleared → Filtered.")
+            Text("An article whose title, summary or tag contains a muted keyword (any case) skips the Inbox and goes straight to Cleared, tagged with the keyword. Adding a keyword also clears matching articles already in the Inbox; removing it brings back the ones it caught. Review the catch under Cleared → Filtered.")
                 .font(.system(size: 11.5))
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -343,7 +343,7 @@ struct SettingsView: View {
                 .buttonStyle(HoverButtonStyle())
             }
 
-            Text("Smart inboxes are saved views of the Inbox, shown as subtabs at its top in this order; when they don't all fit, the rest go into a More menu, so move the ones you use most to the top. An article belongs to a smart inbox when it matches any of its filters; a filter matches when the article comes from one of its sources (or any, if none are chosen) and its title or summary contains its keywords.")
+            Text("Smart inboxes are saved views of the Inbox, shown as subtabs at its top in this order; when they don't all fit, the rest go into a More menu, so move the ones you use most to the top. An article belongs to a smart inbox when it matches any of its filters; a filter matches when the article comes from one of its sources (or any, if none are chosen) and its title, summary or tag contains its keywords.")
                 .font(.system(size: 11.5))
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -479,7 +479,7 @@ struct SettingsView: View {
     // MARK: Local sources
 
     private static let exampleEventJSON =
-        #"{"source": "Ozonko", "title": "Kindle back in stock", "url": "https://example.com/kindle"}"#
+        #"{"source": "Ozonko", "title": "Kindle back in stock", "url": "https://example.com/kindle", "tag": "back in stock"}"#
     private static let exampleAddURL = LocalEvent.addURL(
         source: "Ozonko", title: "Kindle back in stock", url: "https://example.com/kindle"
     )?.absoluteString ?? ""
@@ -541,7 +541,7 @@ struct SettingsView: View {
             }
             .buttonStyle(HoverButtonStyle())
 
-            Text("Required: source, title. Optional: url, summary, image, published (ISO 8601 or Unix seconds), id (deduplication key; defaults to the url, then the title). Processed files are deleted; files that don't parse are moved to Events/Rejected. Write files atomically (write elsewhere, then move) so they aren't read half-written.")
+            Text("Required: source, title. Optional: url, summary, image, published (ISO 8601 or Unix seconds), id (deduplication key; defaults to the url, then the title), tag (why it was posted, one or two words, shown as a chip and searchable by keyword rules) and symbol (an SF Symbol name drawn next to the tag). Processed files are deleted; files that don't parse are moved to Events/Rejected. Write files atomically (write elsewhere, then move) so they aren't read half-written.")
                 .font(.system(size: 11.5))
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)

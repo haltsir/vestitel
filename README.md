@@ -37,7 +37,7 @@ remembered in **Archive**; anything you want to keep is a **Bookmark**.
   keywords (any/all) and optional sources. They show as subtabs at the top of
   the Inbox with unread counts, in the order you choose; the ones that don't
   fit go into a More menu.
-- **Muted keywords**: articles whose title or summary contains a muted word
+- **Muted keywords**: articles whose title, summary or tag contains a muted word
   skip the Inbox and go straight to Cleared, tagged with the keyword. The
   Cleared tab's "Filtered" toggle shows what they caught, with Restore if a
   filter misfires.

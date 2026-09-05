@@ -30,6 +30,15 @@ struct LocalEvent {
     var published: Date?
     /// Producer-chosen dedupe key; falls back to the URL, then the title.
     var id: String?
+    /// Why the event was posted, one or two words ("last stock", "price
+    /// drop"). Shown as a chip in the row and searched by keyword rules.
+    var tag: String?
+    /// SF Symbol name drawn next to `tag`. Dropped when the name is not a
+    /// symbol on this Mac, or when there is no tag to accompany.
+    var symbol: String?
+
+    /// Longer tags are cut here; a tag is a label, not a sentence.
+    static let tagLimit = 40
 
     static let scheme = "vestitel"
     static let addHost = "add"
@@ -92,15 +101,26 @@ struct LocalEvent {
             return URL(string: text)
         }
         guard let source = string("source"), let title = string("title") else { return nil }
+        let tag = string("tag").flatMap { $0.isEmpty ? nil : String($0.prefix(tagLimit)) }
         let event = LocalEvent(
             source: source, title: title,
             url: url("url") ?? url("link"),
             summary: string("summary").flatMap { $0.isEmpty ? nil : $0 },
             image: url("image"),
             published: parseDate(dict["published"]),
-            id: string("id").flatMap { $0.isEmpty ? nil : $0 }
+            id: string("id").flatMap { $0.isEmpty ? nil : $0 },
+            tag: tag,
+            symbol: tag == nil ? nil : validSymbol(string("symbol"))
         )
         return event.isValid ? event : nil
+    }
+
+    /// The name back if it is an SF Symbol on this Mac, nil otherwise. A
+    /// typo or a symbol from a newer macOS must never crash or draw a blank.
+    static func validSymbol(_ name: String?) -> String? {
+        guard let name = name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty,
+              NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil else { return nil }
+        return name
     }
 
     /// Every event in a drop-folder file: one object, or an array of them.
@@ -114,7 +134,7 @@ struct LocalEvent {
         return from(json: json).map { [$0] } ?? []
     }
 
-    /// vestitel://add?source=…&title=…[&url=…&summary=…&image=…&published=…&id=…]
+    /// vestitel://add?source=…&title=…[&url=…&summary=…&image=…&published=…&id=…&tag=…&symbol=…]
     static func from(url: URL) -> LocalEvent? {
         guard url.scheme?.lowercased() == scheme,
               url.host?.lowercased() == addHost,
@@ -128,12 +148,15 @@ struct LocalEvent {
 
     /// The URL a producer would open to post this event; the Settings
     /// example and a handy way to test the scheme from a terminal.
-    static func addURL(source: String, title: String, url: String?) -> URL? {
+    static func addURL(source: String, title: String, url: String?,
+                       tag: String? = nil, symbol: String? = nil) -> URL? {
         var components = URLComponents()
         components.scheme = scheme
         components.host = addHost
         var items = [URLQueryItem(name: "source", value: source), URLQueryItem(name: "title", value: title)]
         if let url { items.append(URLQueryItem(name: "url", value: url)) }
+        if let tag { items.append(URLQueryItem(name: "tag", value: tag)) }
+        if let symbol { items.append(URLQueryItem(name: "symbol", value: symbol)) }
         components.queryItems = items
         return components.url
     }
@@ -257,7 +280,9 @@ extension AppStore {
                     link: event.url,
                     summary: event.summary,
                     published: event.published,
-                    imageURL: event.image
+                    imageURL: event.image,
+                    tag: event.tag,
+                    symbol: event.symbol
                 )
             }
             added += ingest(items, into: feed)

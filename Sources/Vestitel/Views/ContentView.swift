@@ -338,6 +338,24 @@ struct ArticleRow: View {
             }
     }
 
+    /// The producer's reason for posting ("last stock"), with its SF Symbol
+    /// when one was given. The symbol name was validated at ingest, but the
+    /// article may have synced from a Mac with a newer symbol set, so it is
+    /// checked again here rather than handed to Image blindly.
+    @ViewBuilder
+    private func tagChip(_ tag: String) -> some View {
+        Group {
+            if let symbol = LocalEvent.validSymbol(article.symbol) {
+                Label(tag, systemImage: symbol)
+            } else {
+                Text(tag)
+            }
+        }
+        .padding(.horizontal, 5)
+        .padding(.vertical, 1)
+        .background(Capsule().fill(.quaternary))
+    }
+
     private var rowContent: some View {
         HStack(alignment: .top, spacing: 10) {
             Circle()
@@ -354,6 +372,16 @@ struct ArticleRow: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .helpIfAvailable(summaryTooltip)
 
+                // Compact rows drop the meta line, but the tag is what makes
+                // an event row meaningful ("last stock" vs "price drop"), so
+                // it keeps a line of its own.
+                if compact, let tag = article.tag {
+                    tagChip(tag)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
                 if !compact {
                 HStack(spacing: 5) {
                     SourceMark(
@@ -362,6 +390,10 @@ struct ArticleRow: View {
                     )
                     Text(article.sourceTitle)
                         .fontWeight(.medium)
+                    if let tag = article.tag {
+                        Text("·")
+                        tagChip(tag)
+                    }
                     Text("·")
                     Text(article.published.articleDisplay)
                     if summaryTooltip != nil {

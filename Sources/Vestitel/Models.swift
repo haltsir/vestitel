@@ -48,6 +48,12 @@ struct Article: Identifiable, Codable, Hashable {
     var imageURL: URL? = nil
     var published: Date
     var fetchedAt: Date
+    /// Why a local source posted this ("last stock", "price drop"), shown as
+    /// a chip in the row; nil for feed articles and events without one.
+    var tag: String? = nil
+    /// SF Symbol drawn next to `tag`; only stored when the name resolved on
+    /// the Mac that ingested it, and re-checked before drawing.
+    var symbol: String? = nil
 
     var state: ArticleState = .inbox
     var readAt: Date? = nil     // set when clicked; auto-clears 15 min later

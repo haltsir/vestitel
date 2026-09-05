@@ -22,6 +22,8 @@ Whichever transport you use, an event is the same handful of fields:
 | `image`     | no       | Thumbnail URL. |
 | `published` | no       | When it happened, as ISO 8601 (`2026-08-31T09:15:00Z`) or Unix seconds. Defaults to the moment Vestitel receives it. |
 | `id`        | no       | Deduplication key within the source. Posting the same `id` twice adds one item. Defaults to `url`, then `title`. |
+| `tag`       | no       | Why it was posted, as a short plain-text label of one or two words ("last stock", "price drop", "намаление"). Shown as a chip next to the source name, in compact rows too, and searched by muted keywords and smart-inbox filters, so one filter on the tag gives a "last stock only" view. Trimmed; empty means absent; cut at 40 characters. |
+| `symbol`    | no       | An SF Symbol name (`tag`, `arrow.down.circle`, `clock`) drawn in front of the tag. Ignored when the name is not a symbol on the receiving Mac, or when there is no `tag`. |
 
 Unknown fields are ignored. Everything is plain text; HTML is not rendered.
 
@@ -39,8 +41,14 @@ The file holds one event:
 
 ```json
 {"source": "Ozonko", "title": "Kindle Paperwhite back in stock",
- "url": "https://www.ozone.bg/product/kindle", "id": "ozonko-4821"}
+ "url": "https://www.ozone.bg/product/kindle", "id": "ozonko-4821",
+ "tag": "back in stock", "symbol": "arrow.counterclockwise"}
 ```
+
+The `tag` is the one line of context an inbox row shows besides the title, so
+a producer that posts several kinds of event under one source (price drops,
+last stock, release dates) should set it; the details (price, date) belong in
+`summary`, which shows as a tooltip on the title.
 
 or an array of events:
 
@@ -95,8 +103,8 @@ Open a `vestitel://add` URL with the same fields as query parameters:
 vestitel://add?source=Ozonko&title=Kindle%20back%20in%20stock&url=https%3A%2F%2Fwww.ozone.bg%2Fproduct%2Fkindle
 ```
 
-`source` and `title` are required; `url`, `summary`, `image`, `published` and
-`id` are optional. Percent-encode the values. One URL carries one event.
+`source` and `title` are required; `url`, `summary`, `image`, `published`,
+`id`, `tag` and `symbol` are optional. Percent-encode the values. One URL carries one event.
 
 If Vestitel isn't running, opening the URL launches it and the event is
 delivered once it's up.
@@ -104,7 +112,7 @@ delivered once it's up.
 From a shell:
 
 ```sh
-open "vestitel://add?source=Backup%20Script&title=Nightly%20backup%20finished"
+open "vestitel://add?source=Backup%20Script&title=Nightly%20backup%20finished&tag=done&symbol=checkmark.circle"
 ```
 
 From Swift:

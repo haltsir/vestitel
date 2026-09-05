@@ -190,9 +190,11 @@ final class AppStore: ObservableObject {
         Dictionary(feeds.map { ($0.id, $0.url) }, uniquingKeysWith: { a, _ in a })
     }
 
-    /// Lowercased title + summary, the haystack for keyword rules.
+    /// Lowercased title + summary + tag, the haystack for keyword rules
+    /// (muted keywords and smart-inbox filters). The tag is in so a local
+    /// source's kind ("last stock") can be filtered on or muted by itself.
     private static func searchText(of article: Article) -> String {
-        (article.title + "\n" + (article.summary ?? "")).lowercased()
+        [article.title, article.summary ?? "", article.tag ?? ""].joined(separator: "\n").lowercased()
     }
 
     func matches(_ article: Article, _ inbox: SmartInbox) -> Bool {
@@ -280,13 +282,13 @@ final class AppStore: ObservableObject {
 
     // MARK: Muted keywords
 
-    /// The first muted keyword found in the title or summary, or nil.
+    /// The first muted keyword found in the title, summary or tag, or nil.
     /// Case-insensitive substring match, so "меркурий" also catches
     /// "Меркурий" and "ретроградния Меркурий".
     func mutedKeyword(matching article: Article) -> String? {
         let keywords = settings.mutedKeywords
         guard !keywords.isEmpty else { return nil }
-        let haystack = (article.title + "\n" + (article.summary ?? "")).lowercased()
+        let haystack = Self.searchText(of: article)
         return keywords.first { keyword in
             let needle = keyword.lowercased()
             return !needle.isEmpty && haystack.contains(needle)
@@ -695,7 +697,9 @@ final class AppStore: ObservableObject {
                 summary: item.summary,
                 imageURL: item.imageURL,
                 published: item.published ?? now,
-                fetchedAt: now
+                fetchedAt: now,
+                tag: item.tag,
+                symbol: item.symbol
             )
             if let keyword = mutedKeyword(matching: article) {
                 article.state = .cleared

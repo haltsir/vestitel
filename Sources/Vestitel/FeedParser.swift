@@ -12,6 +12,9 @@ struct ParsedItem {
     var summary: String?
     var published: Date?
     var imageURL: URL? = nil
+    /// Local-source only (see LocalEvent); feeds never set these.
+    var tag: String? = nil
+    var symbol: String? = nil
 }
 
 /// Minimal RSS 2.0 / RSS 1.0 / Atom parser built on XMLParser — no dependencies.

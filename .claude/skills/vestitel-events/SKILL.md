@@ -15,11 +15,21 @@ JSON object. Required: `source` (string, the feed name; keep it stable per
 producer), `title` (string, one line). Optional: `url` (string), `summary`
 (string), `image` (URL string), `published` (ISO 8601 string or Unix seconds
 number; default = receipt time), `id` (dedupe key within the source; default =
-url, then title). Unknown keys are ignored. Plain text only.
+url, then title), `tag` (why it was posted: a one-or-two-word plain-text label
+such as "last stock" or "намаление"; trimmed, empty = absent, cut at 40
+characters), `symbol` (SF Symbol name drawn before the tag; silently dropped
+if not a valid symbol or if there is no tag). Unknown keys are ignored. Plain
+text only.
 
 ```json
-{"source": "Ozonko", "title": "Kindle back in stock", "url": "https://www.ozone.bg/product/kindle", "id": "ozonko-4821"}
+{"source": "Ozonko", "title": "Kindle back in stock", "url": "https://www.ozone.bg/product/kindle", "id": "ozonko-4821", "tag": "back in stock", "symbol": "arrow.counterclockwise"}
 ```
+
+Set `tag` whenever one source posts more than one kind of event: the inbox
+row shows only title, source, tag and date; `summary` is a hover tooltip, so
+put the reason in `tag` and the details (price, date) in `summary`. Tags are
+part of the keyword haystack, so the user can build a smart inbox or mute a
+keyword on them.
 
 ## Transport A: drop folder (preferred for anything recurring)
 
@@ -45,7 +55,7 @@ Swift: `try data.write(to: dir.appendingPathComponent("\(UUID().uuidString).json
 
 ## Transport B: URL (one-off pushes)
 
-`vestitel://add?source=…&title=…[&url=…&summary=…&image=…&published=…&id=…]`,
+`vestitel://add?source=…&title=…[&url=…&summary=…&image=…&published=…&id=…&tag=…&symbol=…]`,
 values percent-encoded, one event per URL. Launches Vestitel if not running.
 
 ```sh
