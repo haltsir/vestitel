@@ -486,39 +486,42 @@ enum TopicGrouper {
             var isPhrase: Bool
             var isProper: Bool   // capitalised somewhere other than a title's first word
             var order: Int       // candidate rank (count, then alphabetical)
-            var position: Int    // where it sits in the newest title
+            var position: Int    // word index in the newest title (Int.max if absent)
+            var words: Int       // how many words the pick spans there
+        }
+        func wordIndex(of range: Range<String.Index>, in title: String) -> Int {
+            title[..<range.lowerBound].split(whereSeparator: { !$0.isLetter && !$0.isNumber }).count
         }
         var picks: [Pick] = []
         for (order, token) in common.enumerated() {
             var display: String? = nil
             var proper = false
             var position = Int.max
+            let words = token.split(separator: " ").count
             if token.contains(" ") {
                 for (t, title) in titles.enumerated() {
                     if let range = title.range(of: token, options: .caseInsensitive) {
                         display = String(title[range])
-                        if t == 0 { position = title.distance(from: title.startIndex, to: range.lowerBound) }
+                        if t == 0 { position = wordIndex(of: range, in: title) }
                         break
                     }
                 }
             } else {
                 outer: for (t, title) in titles.enumerated() {
-                    var offset = 0
                     for (w, word) in title.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).enumerated() {
                         // normalized compare: token "детска" is recovered
                         // from a title that spells it "Детската"
                         if normalize(word.lowercased()) == token {
                             display = String(word)
                             proper = w > 0 && (word.first?.isUppercase ?? false)
-                            if t == 0 { position = offset }
+                            if t == 0 { position = w }
                             break outer
                         }
-                        offset += 1
                     }
                 }
             }
             picks.append(Pick(display: display ?? token.capitalized, isPhrase: token.contains(" "),
-                              isProper: proper, order: order, position: position))
+                              isProper: proper, order: order, position: position, words: words))
         }
         picks.sort {
             if $0.isPhrase != $1.isPhrase { return $0.isPhrase }
@@ -528,6 +531,21 @@ enum TopicGrouper {
         let phraseCount = picks.filter(\.isPhrase).count
         let chosen = picks.prefix(phraseCount >= 2 ? min(phraseCount, 3) : 3)
             .sorted { $0.position < $1.position }
-        return chosen.map(\.display).joined(separator: " · ")
+        // Adjacent capitalised picks are one name: "Асен Василев" opens its
+        // titles, so the tokenizer (which skips the sentence-initial word)
+        // never made it a phrase, but shown side by side it reads as one.
+        var parts: [String] = []
+        var previous: Pick? = nil
+        for pick in chosen {
+            if let last = previous, !parts.isEmpty,
+               pick.position != Int.max, pick.position == last.position + last.words,
+               last.display.first?.isUppercase == true, pick.display.first?.isUppercase == true {
+                parts[parts.count - 1] += " " + pick.display
+            } else {
+                parts.append(pick.display)
+            }
+            previous = pick
+        }
+        return parts.joined(separator: " · ")
     }
 }

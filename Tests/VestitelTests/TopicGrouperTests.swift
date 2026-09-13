@@ -38,4 +38,16 @@ struct TopicGrouperTests {
         #expect(groups.count == 1)
         #expect(groups.first?.headline == "Златен лъв · Woman Unknown")
     }
+
+    @Test @MainActor func headlineJoinsAdjacentCapitalisedPicks() {
+        let articles = [
+            article("Асен Василев: Илияна Йотова е помилвала втори наркодилър, рецидивист и част от ОПГ"),
+            article("„Трябва да се оттегли“. ПП атакува Йотова за това, че е помилвала наркодилър през 2022", minutesAgo: 10),
+            article("Асен Василев: Йотова да се оттегли от президентската надпревара, помилвала е наркодилър", minutesAgo: 20),
+            article("Асен Василев поиска обяснение от Йотова за помилването на наркодилъра Огнян Атанасов", minutesAgo: 30),
+        ]
+        let groups = TopicGrouper.group(articles, sensitivity: 1)
+        #expect(groups.count == 1)
+        #expect(groups.first?.headline == "Асен Василев · Йотова")
+    }
 }

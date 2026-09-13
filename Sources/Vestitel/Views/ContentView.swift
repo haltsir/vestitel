@@ -372,27 +372,37 @@ struct ArticleRow: View {
     /// as a bar under the meta line; group members at the end of it.
     private func actionButtons(small: Bool) -> some View {
         let isBookmarked = store.isBookmarked(article.id)
-        return HStack(spacing: small ? 6 : 14) {
-            InlineActionButton(
+        return HStack(spacing: small ? 6 : 10) {
+            RowActionButton(
                 icon: isBookmarked ? "bookmark.fill" : "bookmark",
                 tint: isBookmarked ? .orange : .secondary,
                 help: isBookmarked ? "Remove bookmark" : "Bookmark",
-                small: small
+                small: small, quiet: true
             ) {
                 store.toggleBookmark(article)
             }
-            InlineActionButton(
+            RowActionButton(
                 icon: justCopied ? "checkmark" : "link",
                 tint: justCopied ? .green : .secondary,
                 help: "Copy link",
                 disabled: article.link == nil,
-                small: small
+                small: small, quiet: true
             ) {
                 store.copyLink(article)
                 justCopied = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { justCopied = false }
             }
             InlineShareButton(url: article.link, small: small)
+        }
+    }
+
+    private var openButton: some View {
+        RowActionButton(
+            icon: "arrow.up.forward.app",
+            help: "Open in browser",
+            visible: hovering
+        ) {
+            store.open(article)
         }
     }
 
@@ -473,15 +483,24 @@ struct ArticleRow: View {
             }
 
             // Clear lives at the top-right corner, same spot on every card
-            // regardless of how tall the article text is; shown on hover,
-            // the frame stays reserved so nothing shifts.
-            if showsActions, canClear {
-                RowActionButton(
-                    icon: "xmark",
-                    help: "Clear now (recoverable for 24 hours)",
-                    visible: hovering
-                ) {
-                    store.clear(article)
+            // regardless of how tall the article text is, with Open in
+            // Browser under it (beside it in compact rows, which are too
+            // short for two); shown on hover, the frames stay reserved so
+            // nothing shifts.
+            if showsActions, canClear || article.link != nil {
+                let layout = compact ? AnyLayout(HStackLayout(spacing: 4)) : AnyLayout(VStackLayout(spacing: 4))
+                layout {
+                    if compact, article.link != nil { openButton }
+                    if canClear {
+                        RowActionButton(
+                            icon: "xmark",
+                            help: "Clear now (recoverable for 24 hours)",
+                            visible: hovering
+                        ) {
+                            store.clear(article)
+                        }
+                    }
+                    if !compact, article.link != nil { openButton }
                 }
             }
         }
@@ -516,6 +535,37 @@ struct ArticleRow: View {
     }
 }
 
+/// Hover tracking that ignores a momentary exit. A `.help()` tooltip
+/// installs its tracking area the first time the pointer arrives, which
+/// AppKit reports as an exit followed by an enter within a frame; bound
+/// straight to a highlight that reads as a double hover, a quick flash of
+/// the button background. The exit is applied only if the pointer is still
+/// out 40 ms later.
+struct DebouncedHover: ViewModifier {
+    @Binding var hovering: Bool
+    var enabled = true
+    @State private var pendingExit: DispatchWorkItem?
+
+    func body(content: Content) -> some View {
+        content.onHover { inside in
+            pendingExit?.cancel()
+            if inside && enabled {
+                hovering = true
+            } else {
+                let work = DispatchWorkItem { hovering = false }
+                pendingExit = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.04, execute: work)
+            }
+        }
+    }
+}
+
+extension View {
+    func debouncedHover(_ hovering: Binding<Bool>, enabled: Bool = true) -> some View {
+        modifier(DebouncedHover(hovering: hovering, enabled: enabled))
+    }
+}
+
 /// Small square icon button used at the trailing edge of rows. It always
 /// occupies its frame; `visible` only fades it and gates hit-testing, so
 /// row layout is identical whether or not the pointer is over the row.
@@ -525,6 +575,11 @@ struct RowActionButton: View {
     let help: String
     var visible = true
     var disabled = false
+    /// Meta-line size for group members, where a full-height button would
+    /// grow the line.
+    var small = false
+    /// No box at rest and no hover animation (see `rowActionLook`).
+    var quiet = false
     let action: () -> Void
 
     @State private var hovering = false
@@ -532,20 +587,14 @@ struct RowActionButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 13, weight: .medium))
-                .frame(width: 26, height: 26)
-                .background(
-                    Color.primary.opacity(hovering ? 0.18 : 0.07),
-                    in: RoundedRectangle(cornerRadius: 6)
-                )
-                .foregroundStyle(hovering ? tint.opacity(1) : tint.opacity(0.85))
+                .rowActionLook(hovering: hovering, tint: tint, small: small, quiet: quiet)
         }
         .buttonStyle(.plain)
         .disabled(disabled || !visible)
         .opacity(visible ? 1 : 0)
         .allowsHitTesting(visible)
-        .onHover { hovering = visible && $0 }
-        .animation(.easeOut(duration: 0.12), value: hovering)
+        .debouncedHover($hovering, enabled: visible)
+        .animation(quiet ? nil : .easeOut(duration: 0.12), value: hovering)
         .help(help)
     }
 }
@@ -558,9 +607,14 @@ struct ArticleThumbnail: View {
         AsyncImage(url: url) { phase in
             switch phase {
             case .success(let image):
+                // clipped here, not only by the clipShape below: a filled
+                // image overflows its frame, and the invisible overflow
+                // still takes clicks meant for the × beside it
                 image
                     .resizable()
                     .scaledToFill()
+                    .frame(width: 52, height: 52)
+                    .clipped()
             default:
                 Color.primary.opacity(0.05)
             }
@@ -595,9 +649,14 @@ struct GroupBanner: View {
             .aspectRatio(aspect, contentMode: .fit)
             .overlay {
                 if let image {
+                    // clipped inside the overlay: the clipShape below only
+                    // trims what is drawn, and a photo cropped to the band
+                    // otherwise keeps intercepting clicks above and below
+                    // it, including the group's × in the header
                     Image(nsImage: image)
                         .resizable()
                         .scaledToFill()
+                        .clipped()
                 } else {
                     Color.primary.opacity(0.05)
                 }
@@ -607,6 +666,7 @@ struct GroupBanner: View {
                 RoundedRectangle(cornerRadius: 8)
                     .strokeBorder(Color.primary.opacity(0.1), lineWidth: 1)
             )
+            .allowsHitTesting(false)
             .task(id: url) { await load() }
     }
 
@@ -622,41 +682,24 @@ struct GroupBanner: View {
     }
 }
 
-/// Small quiet icon button for the always-visible action bar under articles.
-/// No background at rest; a subtle one appears on hover.
-struct InlineActionButton: View {
-    let icon: String
-    var tint: Color = .secondary
-    let help: String
-    var disabled = false
-    /// Meta-line size for group members, where a full-height button would
-    /// grow the line.
-    var small = false
-    let action: () -> Void
-
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: small ? 10.5 : 12, weight: .medium))
-                .frame(width: small ? 20 : 24, height: small ? 16 : 22)
-                .background(
-                    hovering ? Color.primary.opacity(0.12) : .clear,
-                    in: RoundedRectangle(cornerRadius: 5)
-                )
-                .foregroundStyle(hovering ? tint : tint.opacity(0.7))
-        }
-        .buttonStyle(.plain)
-        .disabled(disabled)
-        .opacity(disabled ? 0.35 : 1)
-        .onHover { hovering = !disabled && $0 }
-        .animation(.easeOut(duration: 0.12), value: hovering)
-        .help(help)
+/// The one look for every icon button on a row: a box that darkens on
+/// hover. The × and Open in Browser keep a faint box at rest; the
+/// bookmark/link/share bar is `quiet`: nothing at rest, and the hover fill
+/// appears in one step (no animation), because a background fading in
+/// from transparent is what reads as a blink.
+extension Image {
+    func rowActionLook(hovering: Bool, tint: Color, small: Bool = false, quiet: Bool = false) -> some View {
+        font(.system(size: small ? 11 : 13, weight: .medium))
+            .frame(width: small ? 22 : 26, height: small ? 20 : 26)
+            .background(
+                Color.primary.opacity(hovering ? 0.18 : (quiet ? 0 : 0.07)),
+                in: RoundedRectangle(cornerRadius: small ? 5 : 6)
+            )
+            .foregroundStyle(hovering ? tint.opacity(1) : tint.opacity(quiet ? 0.7 : 0.85))
     }
 }
 
-/// Share via the system share sheet, styled to match InlineActionButton.
+/// Share via the system share sheet, styled like RowActionButton.
 struct InlineShareButton: View {
     let url: URL?
     var small = false
@@ -666,17 +709,10 @@ struct InlineShareButton: View {
         if let url {
             ShareLink(item: url) {
                 Image(systemName: "square.and.arrow.up")
-                    .font(.system(size: small ? 10.5 : 12, weight: .medium))
-                    .frame(width: small ? 20 : 24, height: small ? 16 : 22)
-                    .background(
-                        hovering ? Color.primary.opacity(0.12) : .clear,
-                        in: RoundedRectangle(cornerRadius: 5)
-                    )
-                    .foregroundStyle(hovering ? Color.secondary : Color.secondary.opacity(0.7))
+                    .rowActionLook(hovering: hovering, tint: .secondary, small: small, quiet: true)
             }
             .buttonStyle(.plain)
-            .onHover { hovering = $0 }
-            .animation(.easeOut(duration: 0.12), value: hovering)
+            .debouncedHover($hovering)
             .help("Share")
         }
     }
@@ -777,17 +813,27 @@ struct EmptyStateView: View {
 /// is connected, the content area narrows by the scroller's width the
 /// moment a list overflows, and every trailing × jumps 15 pt to the left.
 /// Overlay scrollers draw over the content instead, so the row layout is
-/// the same whether or not the list scrolls.
+/// the same whether or not the list scrolls. Applied when the probe view
+/// lands in a window (a one-shot dispatch from updateNSView ran before the
+/// hierarchy existed and silently did nothing) and again whenever AppKit
+/// re-applies the system preference.
 struct OverlayScrollers: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView()
-        view.setFrameSize(.zero)
-        return view
-    }
+    final class Probe: NSView {
+        private var observer: NSObjectProtocol?
 
-    func updateNSView(_ view: NSView, context: Context) {
-        DispatchQueue.main.async {
-            var current: NSView? = view
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            apply()
+            if observer == nil {
+                observer = NotificationCenter.default.addObserver(
+                    forName: NSScroller.preferredScrollerStyleDidChangeNotification,
+                    object: nil, queue: .main
+                ) { [weak self] _ in self?.apply() }
+            }
+        }
+
+        func apply() {
+            var current: NSView? = self
             while let candidate = current, !(candidate is NSScrollView) {
                 current = candidate.superview
             }
@@ -797,6 +843,20 @@ struct OverlayScrollers: NSViewRepresentable {
             }
             scrollView.autohidesScrollers = true
         }
+
+        deinit {
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+        }
+    }
+
+    func makeNSView(context: Context) -> Probe {
+        let view = Probe()
+        view.setFrameSize(.zero)
+        return view
+    }
+
+    func updateNSView(_ view: Probe, context: Context) {
+        view.apply()
     }
 }
 
