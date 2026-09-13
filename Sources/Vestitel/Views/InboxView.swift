@@ -36,7 +36,7 @@ struct InboxView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
                         ForEach(groups) { group in
-                            if group.articles.count > 1 {
+                            if group.articles.count > 1 || group.sourceFeedID != nil {
                                 GroupBlock(group: group)
                             } else {
                                 ArticleRow(article: group.articles[0])
@@ -189,6 +189,12 @@ struct GroupBlock: View {
     private static let commitFraction: CGFloat = 0.75
 
     private var collapsed: Bool { store.collapsedGroupIDs.contains(group.id) }
+    private var isSourceGroup: Bool { group.sourceFeedID != nil }
+    /// Topic groups wear the accent; a source block wears its feed's colour.
+    private var tint: Color {
+        guard let first = group.articles.first, isSourceGroup else { return .accentColor }
+        return store.sourceColor(feedID: first.feedID, title: first.sourceTitle)
+    }
 
     var body: some View {
         ZStack {
@@ -203,6 +209,7 @@ struct GroupBlock: View {
             }
         }
         .onHover { hovering = $0 }
+        .hoverRefresh($hovering)
     }
 
     private var clearPane: some View {
@@ -284,6 +291,12 @@ struct GroupBlock: View {
                         Image(systemName: "chevron.down")
                             .font(.system(size: 10, weight: .bold))
                             .rotationEffect(.degrees(collapsed ? -90 : 0))
+                        if isSourceGroup, let first = group.articles.first {
+                            SourceMark(
+                                host: store.sourceHost(feedID: first.feedID, title: first.sourceTitle),
+                                color: tint
+                            )
+                        }
                         Text(group.headline ?? "Related stories")
                             .font(.system(size: 12.5, weight: .bold))
                             .lineLimit(1)
@@ -291,7 +304,7 @@ struct GroupBlock: View {
                             .font(.system(size: 10.5, weight: .bold))
                             .padding(.horizontal, 6.5)
                             .padding(.vertical, 1.5)
-                            .background(Color.accentColor, in: Capsule())
+                            .background(tint, in: Capsule())
                             .foregroundStyle(.white)
                     }
                     .contentShape(Rectangle())
@@ -315,7 +328,7 @@ struct GroupBlock: View {
                     store.clearGroup(group)
                 }
             }
-            .foregroundStyle(Color.accentColor)
+            .foregroundStyle(tint)
             .padding(.leading, 16)
             .padding(.trailing, 8)
             .padding(.top, 7)
@@ -324,7 +337,7 @@ struct GroupBlock: View {
             .gesture(headerDragGesture)
 
             if !collapsed {
-                if !store.settings.compactRows,
+                if !isSourceGroup, !store.settings.compactRows,
                    let hero = group.articles.first(where: { $0.imageURL != nil })?.imageURL {
                     GroupBanner(url: hero)
                         .padding(.horizontal, 12)
@@ -333,20 +346,24 @@ struct GroupBlock: View {
                         .padding(.bottom, 2)
                 }
                 ForEach(Array(group.articles.enumerated()), id: \.element.id) { index, article in
-                    ArticleRow(article: article, placement: index == 0 ? .lead : .member)
+                    // a source block is a list, not one story: every row the
+                    // same, dense (member style), none of them the lead
+                    ArticleRow(article: article,
+                               placement: isSourceGroup || index > 0 ? .member : .lead,
+                               hidesSource: isSourceGroup)
                         .padding(.leading, 4)
                 }
             }
         }
         .padding(.bottom, 4)
-        .background(Color.accentColor.opacity(0.09), in: RoundedRectangle(cornerRadius: 10))
+        .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 10))
         .overlay(
             RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(Color.accentColor.opacity(0.35), lineWidth: 1)
+                .strokeBorder(tint.opacity(0.35), lineWidth: 1)
         )
         .overlay(alignment: .leading) {
             UnevenRoundedRectangle(topLeadingRadius: 10, bottomLeadingRadius: 10)
-                .fill(Color.accentColor.opacity(0.8))
+                .fill(tint.opacity(0.8))
                 .frame(width: 3.5)
         }
         .padding(.vertical, 5)

@@ -90,6 +90,14 @@ struct ContentView: View {
 
                 Spacer()
 
+                if tab == .inbox {
+                    HeaderButton(
+                        icon: store.settings.groupBySource ? "rectangle.3.group.fill" : "rectangle.3.group",
+                        help: store.settings.groupBySource ? "Show topic groups" : "Group by source"
+                    ) {
+                        store.settings.groupBySource.toggle()
+                    }
+                }
                 HeaderButton(
                     icon: store.settings.compactRows ? "rectangle.expand.vertical" : "rectangle.compress.vertical",
                     help: store.settings.compactRows ? "Full article cards" : "Compact: titles only"
@@ -211,6 +219,9 @@ struct ArticleRow: View {
     let article: Article
     var showsActions = true
     var placement: GroupPlacement = .standalone
+    /// In a source block every row is from the same feed, so the meta
+    /// line skips the source mark and name.
+    var hidesSource = false
 
     @State private var hovering = false
     @State private var justCopied = false
@@ -248,6 +259,7 @@ struct ArticleRow: View {
             }
         }
         .onHover { hovering = $0 }
+        .hoverRefresh($hovering)
     }
 
     // MARK: Swipe to act — right = clear, left = bookmark.
@@ -434,17 +446,19 @@ struct ArticleRow: View {
 
                 if !compact {
                 HStack(spacing: 5) {
-                    SourceMark(
-                        host: store.sourceHost(feedID: article.feedID, title: article.sourceTitle),
-                        color: store.sourceColor(feedID: article.feedID, title: article.sourceTitle)
-                    )
-                    Text(article.sourceTitle)
-                        .fontWeight(.medium)
+                    if !hidesSource {
+                        SourceMark(
+                            host: store.sourceHost(feedID: article.feedID, title: article.sourceTitle),
+                            color: store.sourceColor(feedID: article.feedID, title: article.sourceTitle)
+                        )
+                        Text(article.sourceTitle)
+                            .fontWeight(.medium)
+                    }
                     if let tag = article.tag {
-                        Text("·")
+                        if !hidesSource { Text("·") }
                         tagChip(tag)
                     }
-                    Text("·")
+                    if !hidesSource || article.tag != nil { Text("·") }
                     Text(article.published.articleDisplay)
                     if let minutes = store.minutesUntilClear(article) {
                         Text("·")
@@ -564,6 +578,39 @@ extension View {
     func debouncedHover(_ hovering: Binding<Bool>, enabled: Bool = true) -> some View {
         modifier(DebouncedHover(hovering: hovering, enabled: enabled))
     }
+
+    /// Keeps a hover state right when the view moves under a *stationary*
+    /// pointer: `onHover` only fires on pointer movement, so after clearing
+    /// a row the next row slides under the cursor without ever learning it
+    /// is hovered, and its × stays hidden until the mouse twitches. The
+    /// probe re-checks the pointer against the view's frame whenever that
+    /// frame changes (and when the view appears).
+    func hoverRefresh(_ hovering: Binding<Bool>, enabled: Bool = true) -> some View {
+        background(GeometryReader { proxy in
+            PointerProbe(frame: proxy.frame(in: .global)) { inside in
+                let value = inside && enabled
+                if hovering.wrappedValue != value { hovering.wrappedValue = value }
+            }
+        })
+    }
+}
+
+/// AppKit side of `hoverRefresh`: sized to the view it backs, it asks its
+/// window where the pointer is and reports whether that is inside. `frame`
+/// is only there so SwiftUI calls `updateNSView` when the view moves.
+struct PointerProbe: NSViewRepresentable {
+    var frame: CGRect
+    var report: (Bool) -> Void
+
+    func makeNSView(context: Context) -> NSView { NSView() }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        DispatchQueue.main.async {
+            guard let window = view.window, window.isVisible else { return }
+            let local = view.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+            report(view.bounds.contains(local))
+        }
+    }
 }
 
 /// Small square icon button used at the trailing edge of rows. It always
@@ -594,6 +641,7 @@ struct RowActionButton: View {
         .opacity(visible ? 1 : 0)
         .allowsHitTesting(visible)
         .debouncedHover($hovering, enabled: visible)
+        .hoverRefresh($hovering, enabled: visible)
         .animation(quiet ? nil : .easeOut(duration: 0.12), value: hovering)
         .help(help)
     }
@@ -713,6 +761,7 @@ struct InlineShareButton: View {
             }
             .buttonStyle(.plain)
             .debouncedHover($hovering)
+            .hoverRefresh($hovering)
             .help("Share")
         }
     }

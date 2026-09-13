@@ -183,6 +183,10 @@ struct TopicGroup: Identifiable {
     var id: String
     var headline: String?       // nil for singleton groups
     var articles: [Article]
+    /// Set when the group is "everything from this feed" (group-by-source
+    /// mode) rather than a same-story cluster: the block then shows the
+    /// source mark and colour, no banner, and one row style for all.
+    var sourceFeedID: UUID? = nil
 
     var newest: Date { articles.map(\.published).max() ?? .distantPast }
 }
@@ -200,6 +204,10 @@ struct AppSettings: Codable, Equatable {
     /// monochrome in every state.
     var allowColoredIcon: Bool = true
     var compactRows: Bool = false
+    /// Inbox shown as one block per source (feed) instead of topic groups;
+    /// toggled from the Inbox header. Topic grouping is not applied while
+    /// this is on.
+    var groupBySource: Bool = false
     /// Absolute path of a cloud-synced folder shared between Macs (Google
     /// Drive etc.); nil = sync off. Each machine writes only its own
     /// vestitel-<machineID>.json there and merges the others'.
@@ -231,6 +239,7 @@ struct AppSettings: Codable, Equatable {
         maxArticlesPerFeed = try c.decodeIfPresent(Int.self, forKey: .maxArticlesPerFeed) ?? 50
         allowColoredIcon = try c.decodeIfPresent(Bool.self, forKey: .allowColoredIcon) ?? true
         compactRows = try c.decodeIfPresent(Bool.self, forKey: .compactRows) ?? false
+        groupBySource = try c.decodeIfPresent(Bool.self, forKey: .groupBySource) ?? false
         syncFolderPath = try c.decodeIfPresent(String.self, forKey: .syncFolderPath)
         syncPreferences = try c.decodeIfPresent(Bool.self, forKey: .syncPreferences) ?? false
         autoUpdateEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoUpdateEnabled) ?? true

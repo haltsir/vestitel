@@ -260,7 +260,8 @@ final class AppStore: ObservableObject {
         return groupedInbox.compactMap { group in
             let members = group.articles.filter { matches($0, inbox, feedURLByID: urls) }
             guard !members.isEmpty else { return nil }
-            return TopicGroup(id: group.id, headline: group.headline, articles: members)
+            return TopicGroup(id: group.id, headline: group.headline, articles: members,
+                              sourceFeedID: group.sourceFeedID)
         }
     }
 
@@ -375,6 +376,7 @@ final class AppStore: ObservableObject {
 
     var groupedInbox: [TopicGroup] {
         let inbox = self.inbox
+        if settings.groupBySource { return Self.sourceGroups(inbox) }
         guard settings.groupingEnabled else {
             return inbox.map { TopicGroup(id: $0.id, headline: nil, articles: [$0]) }
         }
@@ -430,6 +432,27 @@ final class AppStore: ObservableObject {
                 id: ids.sorted().joined(separator: "|"),
                 headline: headline,
                 articles: members
+            )
+        }
+    }
+
+    /// One block per feed, newest feed first, members newest first (the
+    /// inbox is already sorted). A feed with one article is still a block,
+    /// so the mode reads the same top to bottom.
+    private static func sourceGroups(_ inbox: [Article]) -> [TopicGroup] {
+        var order: [UUID] = []
+        var members: [UUID: [Article]] = [:]
+        for article in inbox {
+            if members[article.feedID] == nil { order.append(article.feedID) }
+            members[article.feedID, default: []].append(article)
+        }
+        return order.map { feedID in
+            let articles = members[feedID] ?? []
+            return TopicGroup(
+                id: "source|\(feedID.uuidString)",
+                headline: articles.first?.sourceTitle,
+                articles: articles,
+                sourceFeedID: feedID
             )
         }
     }
