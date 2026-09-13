@@ -98,6 +98,7 @@ extension AppStore {
         for doc in docs where mergeSyncDocument(doc) {
             changed = true
         }
+        if collapseDuplicateReposts() { changed = true }
         adoptRemoteSettings(from: docs)
         if changed {
             save()   // save() also rewrites our sync document
@@ -281,6 +282,13 @@ extension AppStore {
             } else if seen[remote.id] == nil {
                 // Never seen here — genuinely new. (A local seen entry with
                 // no article means we already cleared and purged it.)
+                if !localFeed.isLocal, duplicateIndex(feedID: localFeed.id, title: remote.title) != nil {
+                    // the other Mac fetched a re-post of a story this one
+                    // already holds; same rule as ingest, keep one row
+                    seen[remote.id] = now
+                    changed = true
+                    continue
+                }
                 var a = remote
                 a.feedID = localFeed.id
                 a.sourceTitle = localFeed.title

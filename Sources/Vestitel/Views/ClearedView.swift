@@ -62,6 +62,7 @@ struct ClearedView: View {
                     }
                     .padding(.vertical, 8)
                     .padding(.horizontal, 6)
+                    .overlayScrollers()
                 }
             }
         }
@@ -126,6 +127,7 @@ struct ArchiveView: View {
                     }
                     .padding(.vertical, 8)
                     .padding(.horizontal, 6)
+                    .overlayScrollers()
                 }
             }
         }

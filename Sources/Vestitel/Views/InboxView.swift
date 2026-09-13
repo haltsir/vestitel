@@ -45,6 +45,7 @@ struct InboxView: View {
                     }
                     .padding(.vertical, 8)
                     .padding(.horizontal, 6)
+                    .overlayScrollers()
                 }
             }
 
@@ -90,22 +91,26 @@ struct SmartInboxBar: View {
 
     var body: some View {
         let inboxes = store.settings.smartInboxes
+        let counts = store.smartInboxUnreadCounts
+        let all = store.unreadCount
         ViewThatFits(in: .horizontal) {
             ForEach(Array(stride(from: inboxes.count, through: 0, by: -1)), id: \.self) { visibleCount in
-                strip(visible: Array(inboxes.prefix(visibleCount)), overflow: Array(inboxes.dropFirst(visibleCount)))
+                strip(visible: Array(inboxes.prefix(visibleCount)), overflow: Array(inboxes.dropFirst(visibleCount)),
+                      counts: counts, all: all)
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 7)
     }
 
-    private func strip(visible: [SmartInbox], overflow: [SmartInbox]) -> some View {
+    private func strip(visible: [SmartInbox], overflow: [SmartInbox],
+                       counts: [UUID: Int], all: Int) -> some View {
         HStack(spacing: 6) {
-            chip(name: "All", count: store.unreadCount, selected: store.selectedSmartInboxID == nil) {
+            chip(name: "All", count: all, selected: store.selectedSmartInboxID == nil) {
                 store.selectedSmartInboxID = nil
             }
             ForEach(visible) { inbox in
-                chip(name: inbox.name, count: store.unreadCount(in: inbox),
+                chip(name: inbox.name, count: counts[inbox.id] ?? 0,
                      selected: store.selectedSmartInboxID == inbox.id) {
                     store.selectedSmartInboxID = inbox.id
                 }
@@ -117,14 +122,14 @@ struct SmartInboxBar: View {
                         Button {
                             store.selectedSmartInboxID = inbox.id
                         } label: {
-                            let n = store.unreadCount(in: inbox)
+                            let n = counts[inbox.id] ?? 0
                             Text(n > 0 ? "\(inbox.name)  (\(n))" : inbox.name)
                             if inbox.id == store.selectedSmartInboxID { Image(systemName: "checkmark") }
                         }
                     }
                 } label: {
                     chipLabel(name: overflowSelected?.name ?? "More",
-                              count: overflowSelected.map(store.unreadCount(in:)) ?? 0,
+                              count: overflowSelected.map { counts[$0.id] ?? 0 } ?? 0,
                               selected: overflowSelected != nil, menu: true)
                 }
                 .menuStyle(.borderlessButton)
@@ -175,10 +180,10 @@ struct SmartInboxBar: View {
 struct GroupBlock: View {
     @EnvironmentObject var store: AppStore
     let group: TopicGroup
-    @State private var hovering = false
     @State private var dragOffset: CGFloat = 0
     @State private var armed = false
     @State private var dragIsHorizontal: Bool? = nil
+    @State private var hovering = false
 
     private static let actionWidth: CGFloat = 84
     private static let commitFraction: CGFloat = 0.75
@@ -280,8 +285,7 @@ struct GroupBlock: View {
                             .font(.system(size: 10, weight: .bold))
                             .rotationEffect(.degrees(collapsed ? -90 : 0))
                         Text(group.headline ?? "Related stories")
-                            .font(.system(size: 11.5, weight: .bold))
-                            .textCase(.uppercase)
+                            .font(.system(size: 12.5, weight: .bold))
                             .lineLimit(1)
                         Text("\(group.articles.count)")
                             .font(.system(size: 10.5, weight: .bold))
@@ -297,6 +301,12 @@ struct GroupBlock: View {
 
                 Spacer(minLength: 4)
 
+                // the group's own time, so a collapsed group still says when
+                Text(group.newest.articleDisplay)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+
+                // on hover, like the × on every row; the frame stays reserved
                 RowActionButton(
                     icon: "xmark",
                     help: "Clear all \(group.articles.count) articles in this group",
@@ -314,8 +324,16 @@ struct GroupBlock: View {
             .gesture(headerDragGesture)
 
             if !collapsed {
-                ForEach(group.articles) { article in
-                    ArticleRow(article: article)
+                if !store.settings.compactRows,
+                   let hero = group.articles.first(where: { $0.imageURL != nil })?.imageURL {
+                    GroupBanner(url: hero)
+                        .padding(.horizontal, 12)
+                        .padding(.leading, 4)
+                        .padding(.top, 6)
+                        .padding(.bottom, 2)
+                }
+                ForEach(Array(group.articles.enumerated()), id: \.element.id) { index, article in
+                    ArticleRow(article: article, placement: index == 0 ? .lead : .member)
                         .padding(.leading, 4)
                 }
             }

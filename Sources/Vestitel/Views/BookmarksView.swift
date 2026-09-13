@@ -34,6 +34,7 @@ struct BookmarksView: View {
                     }
                     .padding(.vertical, 8)
                     .padding(.horizontal, 6)
+                    .overlayScrollers()
                 }
             }
         }

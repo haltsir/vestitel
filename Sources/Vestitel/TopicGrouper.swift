@@ -180,6 +180,10 @@ enum TopicGrouper {
             result.tokens.insert(name)
             result.names.insert(name)
         }
+        for name in capitalisedRuns(in: remainder) {
+            result.tokens.insert(name)
+            result.names.insert(name)
+        }
         for word in words(in: remainder[...]) {
             insertWord(word, into: &result.tokens)
         }
@@ -209,6 +213,49 @@ enum TopicGrouper {
             }
             return true
         }
+        return phrases
+    }
+
+    /// The Bulgarian stand-in for the name tagger: in a Cyrillic title, a
+    /// run of two or more capitalised words is a name ("Матилд Арсел",
+    /// "Северна Корея") or a foreign title ("Woman Unknown", "Steam Deck"),
+    /// since Bulgarian doesn't capitalise anything else mid-sentence. The
+    /// sentence-initial word is skipped unless it is Latin script (a foreign
+    /// name opening the title). Not applied to Latin-script titles, where
+    /// Title Case headlines would turn every title into one phrase.
+    private static func capitalisedRuns(in text: String) -> [String] {
+        var cyrillic = 0, latin = 0
+        for s in text.unicodeScalars {
+            if (0x400...0x4FF).contains(s.value) { cyrillic += 1 }
+            else if (65...90).contains(s.value) || (97...122).contains(s.value) { latin += 1 }
+        }
+        guard cyrillic > latin else { return [] }
+
+        var phrases: [String] = []
+        var run: [String] = []
+        func flush() {
+            if run.count > 1 {
+                let phrase = run.map { normalize($0.lowercased()) }.joined(separator: " ")
+                if phrase.count >= 3 { phrases.append(phrase) }
+            }
+            run = []
+        }
+        let chunks = text.split(whereSeparator: { $0.isWhitespace })
+        for (index, chunk) in chunks.enumerated() {
+            let chunkWords = words(in: chunk)
+            guard let first = chunkWords.first, let letter = first.first, letter.isUppercase else {
+                flush()
+                continue
+            }
+            let isLatin = letter.isASCII
+            if index == 0, !isLatin {
+                continue
+            }
+            run.append(contentsOf: chunkWords)
+            // punctuation after the word ends the name: "Арсел, която"
+            if let last = chunk.last, !(last.isLetter || last.isNumber) { flush() }
+        }
+        flush()
         return phrases
     }
 
@@ -305,10 +352,30 @@ enum TopicGrouper {
             if ra != rb { parent[ra] = rb }
         }
 
+        // Inverted index: a pair can only link with shared weight >= 2, i.e.
+        // two shared tokens or one shared quoted phrase, so every other
+        // pair is skipped without touching a Set. Against all-pairs this is
+        // the difference between ~400k intersections and a few thousand for
+        // an inbox of ~900 titles.
+        var postings: [String: [Int]] = [:]
         for i in articles.indices {
-            for j in (i + 1)..<articles.count {
+            for token in tokenSets[i].tokens { postings[token, default: []].append(i) }
+        }
+        var sharedCount: [Int: Int] = [:]
+        var quotedHit = Set<Int>()
+        for i in articles.indices {
+            sharedCount.removeAll(keepingCapacity: true)
+            quotedHit.removeAll(keepingCapacity: true)
+            for token in tokenSets[i].tokens {
+                guard let list = postings[token] else { continue }
+                let quoted = tokenSets[i].quoted.contains(token)
+                for j in list where j > i {
+                    sharedCount[j, default: 0] += 1
+                    if quoted || tokenSets[j].quoted.contains(token) { quotedHit.insert(j) }
+                }
+            }
+            for (j, count) in sharedCount where count >= 2 || quotedHit.contains(j) {
                 let shared = tokenSets[i].tokens.intersection(tokenSets[j].tokens)
-                guard !shared.isEmpty else { continue }
 
                 let unionCount = tokenSets[i].tokens.union(tokenSets[j].tokens).count
                 let jaccard = unionCount == 0 ? 0 : Double(shared.count) / Double(unionCount)
@@ -380,8 +447,21 @@ enum TopicGrouper {
         return 1 - dot / denom
     }
 
-    /// Human-readable label for a group: the tokens shared by most member titles,
-    /// rendered in their original casing from the first title that contains them.
+    /// Regroup the members of one group after some were removed (exact:
+    /// clusters are connected components of the link graph, so losing a
+    /// member can only split its own component). Same output shape as
+    /// `group`, sorted newest first.
+    static func regroup(_ members: [Article], sensitivity: Double) -> [TopicGroup] {
+        group(members, sensitivity: sensitivity)
+    }
+
+    /// Human-readable label for a group: the tokens shared by most member
+    /// titles, rendered in their original casing from the first title that
+    /// contains them. Names come first: a quoted title or a named entity
+    /// labels a story, a shared verb ("спечели") or common noun does not,
+    /// so phrases rank above capitalised words, which rank above the rest,
+    /// and two or more phrases make a complete label on their own. The
+    /// picks are shown in the order they appear in the newest title.
     private static func headline(for tokenSets: [Set<String>], titles: [String]) -> String {
         var counts: [String: Int] = [:]
         for set in tokenSets {
@@ -391,39 +471,63 @@ enum TopicGrouper {
         let candidates = counts.filter { $0.value > majority || $0.value == tokenSets.count }
             .sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
             .map(\.key)
-        // A common phrase makes its component words redundant — without this
+        // A common phrase makes its component words redundant: without this
         // a name group would label itself "South Korea · Korea · South".
         let phrases = candidates.filter { $0.contains(" ") }
         let common = candidates.filter { token in
             token.contains(" ") || !phrases.contains { phrase in
                 phrase.split(separator: " ").contains(Substring(token))
             }
-        }.prefix(3)
+        }
         guard !common.isEmpty else { return "Related stories" }
 
-        // Recover original casing from the titles.
-        var display: [String] = []
-        for token in common {
-            var found: String? = nil
+        struct Pick {
+            var display: String
+            var isPhrase: Bool
+            var isProper: Bool   // capitalised somewhere other than a title's first word
+            var order: Int       // candidate rank (count, then alphabetical)
+            var position: Int    // where it sits in the newest title
+        }
+        var picks: [Pick] = []
+        for (order, token) in common.enumerated() {
+            var display: String? = nil
+            var proper = false
+            var position = Int.max
             if token.contains(" ") {
-                // quoted-phrase token: find it verbatim in some title
-                for title in titles {
+                for (t, title) in titles.enumerated() {
                     if let range = title.range(of: token, options: .caseInsensitive) {
-                        found = String(title[range])
+                        display = String(title[range])
+                        if t == 0 { position = title.distance(from: title.startIndex, to: range.lowerBound) }
                         break
                     }
                 }
             } else {
-                outer: for title in titles {
-                    for word in title.split(whereSeparator: { !$0.isLetter && !$0.isNumber }) {
+                outer: for (t, title) in titles.enumerated() {
+                    var offset = 0
+                    for (w, word) in title.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).enumerated() {
                         // normalized compare: token "детска" is recovered
                         // from a title that spells it "Детската"
-                        if normalize(word.lowercased()) == token { found = String(word); break outer }
+                        if normalize(word.lowercased()) == token {
+                            display = String(word)
+                            proper = w > 0 && (word.first?.isUppercase ?? false)
+                            if t == 0 { position = offset }
+                            break outer
+                        }
+                        offset += 1
                     }
                 }
             }
-            display.append(found ?? token.capitalized)
+            picks.append(Pick(display: display ?? token.capitalized, isPhrase: token.contains(" "),
+                              isProper: proper, order: order, position: position))
         }
-        return display.joined(separator: " · ")
+        picks.sort {
+            if $0.isPhrase != $1.isPhrase { return $0.isPhrase }
+            if $0.isProper != $1.isProper { return $0.isProper }
+            return $0.order < $1.order
+        }
+        let phraseCount = picks.filter(\.isPhrase).count
+        let chosen = picks.prefix(phraseCount >= 2 ? min(phraseCount, 3) : 3)
+            .sorted { $0.position < $1.position }
+        return chosen.map(\.display).joined(separator: " · ")
     }
 }

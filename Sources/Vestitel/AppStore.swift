@@ -16,7 +16,9 @@ struct FeedBlockedError: Error, LocalizedError {
 final class AppStore: ObservableObject {
 
     @Published var feeds: [Feed] = []
-    @Published var articles: [Article] = []
+    @Published var articles: [Article] = [] {
+        didSet { inboxCache = nil }
+    }
     @Published var archive: [ArchiveEntry] = []
     @Published var bookmarks: [BookmarkEntry] = []
     @Published var settings: AppSettings = AppSettings() {
@@ -122,7 +124,9 @@ final class AppStore: ObservableObject {
     /// taps the "N new" button (which moves the cutoff forward) or the hold
     /// ends (popover closed / tab left — then everything flows in).
     /// In-memory only: a restart shows everything, which is correct.
-    @Published var inboxHoldStart: Date? = nil
+    @Published var inboxHoldStart: Date? = nil {
+        didSet { inboxCache = nil }
+    }
 
     private func isHeld(_ article: Article) -> Bool {
         guard let holdStart = inboxHoldStart else { return false }
@@ -152,9 +156,18 @@ final class AppStore: ObservableObject {
         hasUnseenArticles = false   // the user is looking at them right now
     }
 
+    /// `inbox` is read many times per render (header count, every smart
+    /// inbox chip, the grouping); filtering and sorting ~900 articles each
+    /// time added up on popover open, so it is computed once per change
+    /// of `articles` or the hold.
+    private var inboxCache: [Article]?
+
     var inbox: [Article] {
-        articles.filter { $0.state == .inbox && !isHeld($0) }
+        if let inboxCache { return inboxCache }
+        let list = articles.filter { $0.state == .inbox && !isHeld($0) }
             .sorted { $0.published > $1.published }
+        inboxCache = list
+        return list
     }
 
     var unreadCount: Int {
@@ -194,8 +207,17 @@ final class AppStore: ObservableObject {
     /// (muted keywords and smart-inbox filters). The tag is in so a local
     /// source's kind ("last stock") can be filtered on or muted by itself.
     private static func searchText(of article: Article) -> String {
-        [article.title, article.summary ?? "", article.tag ?? ""].joined(separator: "\n").lowercased()
+        if let cached = searchTextCache[article.id] { return cached }
+        if searchTextCache.count > 4000 { searchTextCache.removeAll() }
+        let text = [article.title, article.summary ?? "", article.tag ?? ""].joined(separator: "\n").lowercased()
+        searchTextCache[article.id] = text
+        return text
     }
+
+    /// Lowercasing title + summary for every article on every smart inbox
+    /// count was a measurable share of popover open; an article's text
+    /// never changes for its id, so it is done once. Main-thread only.
+    private static var searchTextCache: [String: String] = [:]
 
     func matches(_ article: Article, _ inbox: SmartInbox) -> Bool {
         matches(article, inbox, feedURLByID: feedURLByID)
@@ -245,6 +267,20 @@ final class AppStore: ObservableObject {
     func unreadCount(in inbox: SmartInbox) -> Int {
         let urls = feedURLByID
         return self.inbox.lazy.filter { !$0.isRead && self.matches($0, inbox, feedURLByID: urls) }.count
+    }
+
+    /// Unread count per smart inbox in one pass over the inbox, for the
+    /// chip strip (which otherwise asks per chip, per ViewThatFits
+    /// candidate layout).
+    var smartInboxUnreadCounts: [UUID: Int] {
+        let urls = feedURLByID
+        var counts: [UUID: Int] = [:]
+        for article in inbox where !article.isRead {
+            for smart in settings.smartInboxes where matches(article, smart, feedURLByID: urls) {
+                counts[smart.id, default: 0] += 1
+            }
+        }
+        return counts
     }
 
     /// "Clear Inbox" scoped to what's on screen: with a smart inbox selected
@@ -334,7 +370,8 @@ final class AppStore: ObservableObject {
     /// every title (slow), so it only happens when the inbox composition or
     /// sensitivity changes — not on every render/tab switch. The cache holds
     /// ids, not Article values, so read/cleared state is always current.
-    private var groupCache: (key: Int, structure: [(headline: String?, ids: [String])])?
+    private var groupCache: (key: Int, sensitivity: Double, ids: Set<String>,
+                             structure: [(headline: String?, ids: [String])])?
 
     var groupedInbox: [TopicGroup] {
         let inbox = self.inbox
@@ -347,16 +384,45 @@ final class AppStore: ObservableObject {
         hasher.combine(settings.groupingSensitivity)
         let key = hasher.finalize()
 
-        let structure: [(headline: String?, ids: [String])]
+        let byID = Dictionary(inbox.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let ids = Set(byID.keys)
+        let sensitivity = settings.groupingSensitivity
+        var structure: [(headline: String?, ids: [String])]
         if let cache = groupCache, cache.key == key {
             structure = cache.structure
+        } else if let cache = groupCache, cache.sensitivity == sensitivity, ids.isSubset(of: cache.ids) {
+            // Only removals since the last grouping (a clear, a read
+            // countdown, a hold release never removes). Groups are connected
+            // components, so a removal can only split the group it left:
+            // regroup that one group's survivors, keep every other as is.
+            // A full regrouping of a large inbox costs hundreds of ms on the
+            // main thread, which is what made clearing one row feel slow.
+            structure = []
+            for entry in cache.structure {
+                let survivors = entry.ids.filter { ids.contains($0) }
+                if survivors.count == entry.ids.count {
+                    structure.append(entry)
+                } else if survivors.count > 1 {
+                    let members = survivors.compactMap { byID[$0] }
+                    for group in TopicGrouper.regroup(members, sensitivity: sensitivity) {
+                        structure.append((group.headline, group.articles.map(\.id)))
+                    }
+                } else if let only = survivors.first {
+                    structure.append((nil, [only]))
+                }
+            }
+            structure.sort {
+                let a = $0.ids.compactMap { byID[$0]?.published }.max() ?? .distantPast
+                let b = $1.ids.compactMap { byID[$0]?.published }.max() ?? .distantPast
+                return a > b
+            }
+            groupCache = (key, sensitivity, ids, structure)
         } else {
-            let groups = TopicGrouper.group(inbox, sensitivity: settings.groupingSensitivity)
+            let groups = TopicGrouper.group(inbox, sensitivity: sensitivity)
             structure = groups.map { ($0.headline, $0.articles.map(\.id)) }
-            groupCache = (key, structure)
+            groupCache = (key, sensitivity, ids, structure)
         }
 
-        let byID = Dictionary(inbox.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         return structure.compactMap { headline, ids in
             let members = ids.compactMap { byID[$0] }
             guard !members.isEmpty else { return nil }
@@ -382,6 +448,10 @@ final class AppStore: ObservableObject {
         }
         noteVersionChange()
         sweep()
+        // Warm the grouping caches (tokens, name tags, embeddings) now, on
+        // the loaded inbox: cold they cost over a second for a large inbox,
+        // which would otherwise land on the first popover open.
+        DispatchQueue.main.async { [weak self] in _ = self?.groupedInbox }
         sweepTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.sweep() }
         }
@@ -688,6 +758,21 @@ final class AppStore: ObservableObject {
             let id = "\(feed.url.absoluteString)#\(key)"
             guard seen[id] == nil else { continue }
             seen[id] = now
+            if !feed.isLocal, let idx = duplicateIndex(feedID: feed.id, title: item.title) {
+                // Same feed, same title, new guid: a republished story (dir.bg
+                // files one piece under two sections with "-1" appended).
+                // The existing row takes the newer link, image and time
+                // (feeds list newest first, so the duplicate met here is
+                // often the older one); if it was already read or cleared,
+                // the re-post stays gone.
+                let published = item.published ?? now
+                if articles[idx].state == .inbox, published > articles[idx].published {
+                    if let link = item.link { articles[idx].link = link }
+                    if let image = item.imageURL { articles[idx].imageURL = image }
+                    articles[idx].published = published
+                }
+                continue
+            }
             var article = Article(
                 id: id,
                 feedID: feed.id,
@@ -711,6 +796,53 @@ final class AppStore: ObservableObject {
             articles.append(article)
         }
         return added
+    }
+
+    /// The article this feed already holds under the same title (case- and
+    /// whitespace-insensitive), or nil. One source repeating itself is not
+    /// a group of related stories, it is one story twice. Local sources are
+    /// exempt at the call sites: a script posting "Backup finished" nightly
+    /// means every one of them.
+    /// (internal, not private: SyncEngine checks adoptions the same way)
+    func duplicateIndex(feedID: UUID, title: String) -> Int? {
+        let key = Self.titleKey(title)
+        return articles.firstIndex { $0.feedID == feedID && Self.titleKey($0.title) == key }
+    }
+
+    /// Letters and digits only: a re-post that swaps straight quotes for
+    /// curly ones, or drops a trailing full stop, is still the same title.
+    private static func titleKey(_ title: String) -> String {
+        title.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }).joined(separator: " ")
+    }
+
+    /// Collapse same-feed same-title inbox articles that got in before the
+    /// ingest-time check existed, or through an older build on the other
+    /// Mac: the newest stays, the rest go (their ids remain seen). A read
+    /// mark on a dropped copy carries over, so reading the older copy
+    /// doesn't resurface the story as unread. Runs at load and after every
+    /// sync merge; returns whether anything changed.
+    @discardableResult
+    func collapseDuplicateReposts() -> Bool {
+        let localFeedIDs = Set(feeds.filter(\.isLocal).map(\.id))
+        var keptIndexByKey: [String: Int] = [:]
+        var drop = Set<Int>()
+        let ordered = articles.indices.sorted { articles[$0].published > articles[$1].published }
+        for idx in ordered {
+            let article = articles[idx]
+            guard article.state == .inbox, !localFeedIDs.contains(article.feedID) else { continue }
+            let key = "\(article.feedID.uuidString)\n\(Self.titleKey(article.title))"
+            if let kept = keptIndexByKey[key] {
+                if let readAt = article.readAt, readAt < (articles[kept].readAt ?? .distantFuture) {
+                    articles[kept].readAt = readAt
+                }
+                drop.insert(idx)
+            } else {
+                keptIndexByKey[key] = idx
+            }
+        }
+        guard !drop.isEmpty else { return false }
+        articles = articles.enumerated().filter { !drop.contains($0.offset) }.map(\.element)
+        return true
     }
 
     /// Play the menu bar wiggle for ~2.5 s (two loops of the frame cycle).
@@ -1043,5 +1175,6 @@ final class AppStore: ObservableObject {
         adoptingSettings = true
         settings = state.settings
         adoptingSettings = false
+        if collapseDuplicateReposts() { save() }
     }
 }

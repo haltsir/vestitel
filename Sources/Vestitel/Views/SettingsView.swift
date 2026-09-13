@@ -39,6 +39,7 @@ struct SettingsView: View {
                 aboutSection
             }
             .padding(14)
+            .overlayScrollers()
         }
         .onAppear(perform: offerClipboardFeed)
     }

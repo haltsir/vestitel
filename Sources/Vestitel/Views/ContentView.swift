@@ -195,10 +195,22 @@ struct OpenAllButton: View {
 
 // MARK: - Shared row
 
+/// Where a row sits inside a topic group. The group shows one photo as a
+/// full-width banner under its header, so no member row carries a
+/// thumbnail; the lead row keeps the full action bar, members keep their
+/// actions as small icons at the end of the meta line, so a group reads as
+/// one story with its variants, not as N identical cards.
+enum GroupPlacement {
+    case standalone
+    case lead
+    case member
+}
+
 struct ArticleRow: View {
     @EnvironmentObject var store: AppStore
     let article: Article
     var showsActions = true
+    var placement: GroupPlacement = .standalone
 
     @State private var hovering = false
     @State private var justCopied = false
@@ -356,6 +368,34 @@ struct ArticleRow: View {
         .background(Capsule().fill(.quaternary))
     }
 
+    /// Bookmark, copy link, share. The lead and standalone rows show them
+    /// as a bar under the meta line; group members at the end of it.
+    private func actionButtons(small: Bool) -> some View {
+        let isBookmarked = store.isBookmarked(article.id)
+        return HStack(spacing: small ? 6 : 14) {
+            InlineActionButton(
+                icon: isBookmarked ? "bookmark.fill" : "bookmark",
+                tint: isBookmarked ? .orange : .secondary,
+                help: isBookmarked ? "Remove bookmark" : "Bookmark",
+                small: small
+            ) {
+                store.toggleBookmark(article)
+            }
+            InlineActionButton(
+                icon: justCopied ? "checkmark" : "link",
+                tint: justCopied ? .green : .secondary,
+                help: "Copy link",
+                disabled: article.link == nil,
+                small: small
+            ) {
+                store.copyLink(article)
+                justCopied = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { justCopied = false }
+            }
+            InlineShareButton(url: article.link, small: small)
+        }
+    }
+
     private var rowContent: some View {
         HStack(alignment: .top, spacing: 10) {
             Circle()
@@ -396,13 +436,6 @@ struct ArticleRow: View {
                     }
                     Text("·")
                     Text(article.published.articleDisplay)
-                    if summaryTooltip != nil {
-                        // marks articles whose title reveals a description on hover
-                        Image(systemName: "text.alignleft")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.tertiary)
-                            .help("Hover the title to preview the article")
-                    }
                     if let minutes = store.minutesUntilClear(article) {
                         Text("·")
                         Label("clears in \(minutes) min", systemImage: "clock")
@@ -413,51 +446,40 @@ struct ArticleRow: View {
                         Label("muted: \(keyword)", systemImage: "line.3.horizontal.decrease.circle")
                             .foregroundStyle(.tertiary)
                     }
+                    if showsActions, placement == .member {
+                        // group members keep their actions on this line,
+                        // always present, small enough not to read as a bar
+                        Spacer(minLength: 8)
+                        actionButtons(small: true)
+                    }
                 }
                 .font(.system(size: 11.5))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
 
                 // Tweet-style action bar, always visible: fixed layout.
-                if showsActions {
-                    let isBookmarked = store.isBookmarked(article.id)
-                    HStack(spacing: 14) {
-                        InlineActionButton(
-                            icon: isBookmarked ? "bookmark.fill" : "bookmark",
-                            tint: isBookmarked ? .orange : .secondary,
-                            help: isBookmarked ? "Remove bookmark" : "Bookmark"
-                        ) {
-                            store.toggleBookmark(article)
-                        }
-                        InlineActionButton(
-                            icon: justCopied ? "checkmark" : "link",
-                            tint: justCopied ? .green : .secondary,
-                            help: "Copy link",
-                            disabled: article.link == nil
-                        ) {
-                            store.copyLink(article)
-                            justCopied = true
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { justCopied = false }
-                        }
-                        InlineShareButton(url: article.link)
-                    }
-                    .padding(.top, 3)
+                if showsActions, placement != .member {
+                    actionButtons(small: false)
+                        .padding(.top, 3)
                 }
                 }  // if !compact
             }
 
             Spacer(minLength: 0)
 
-            if !compact, let imageURL = article.imageURL {
+            // grouped rows have no thumbnail: the group's banner is the photo
+            if !compact, placement == .standalone, let imageURL = article.imageURL {
                 ArticleThumbnail(url: imageURL)
             }
 
             // Clear lives at the top-right corner, same spot on every card
-            // regardless of how tall the article text is.
+            // regardless of how tall the article text is; shown on hover,
+            // the frame stays reserved so nothing shifts.
             if showsActions, canClear {
-                InlineActionButton(
+                RowActionButton(
                     icon: "xmark",
-                    help: "Clear now (recoverable for 24 hours)"
+                    help: "Clear now (recoverable for 24 hours)",
+                    visible: hovering
                 ) {
                     store.clear(article)
                 }
@@ -552,6 +574,54 @@ struct ArticleThumbnail: View {
     }
 }
 
+/// A topic group's one photo, full width under the header. The band takes
+/// the photo's own aspect ratio so nothing is cropped, until the photo is
+/// taller than `minAspect` (about 2.4:1, ~190 pt in the popover): from
+/// there it is a centred cover crop, like CSS object-fit: cover. A fixed
+/// wide band would throw away half of a 16:9 news photo.
+struct GroupBanner: View {
+    let url: URL
+    @State private var image: NSImage? = nil
+
+    private static let minAspect: CGFloat = 2.4
+    /// Decoded photos, kept for the life of the process so a group that
+    /// scrolls in and out doesn't re-fetch. Main-thread only.
+    private static var cache: [URL: NSImage] = [:]
+
+    var body: some View {
+        let aspect = image.map { max($0.size.width / max($0.size.height, 1), Self.minAspect) }
+            ?? Self.minAspect
+        Color.clear
+            .aspectRatio(aspect, contentMode: .fit)
+            .overlay {
+                if let image {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    Color.primary.opacity(0.05)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(Color.primary.opacity(0.1), lineWidth: 1)
+            )
+            .task(id: url) { await load() }
+    }
+
+    private func load() async {
+        if let cached = Self.cache[url] {
+            image = cached
+            return
+        }
+        guard let (data, _) = try? await URLSession.shared.data(from: url),
+              let loaded = NSImage(data: data), loaded.size.height > 0 else { return }
+        Self.cache[url] = loaded
+        image = loaded
+    }
+}
+
 /// Small quiet icon button for the always-visible action bar under articles.
 /// No background at rest; a subtle one appears on hover.
 struct InlineActionButton: View {
@@ -559,6 +629,9 @@ struct InlineActionButton: View {
     var tint: Color = .secondary
     let help: String
     var disabled = false
+    /// Meta-line size for group members, where a full-height button would
+    /// grow the line.
+    var small = false
     let action: () -> Void
 
     @State private var hovering = false
@@ -566,8 +639,8 @@ struct InlineActionButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 12, weight: .medium))
-                .frame(width: 24, height: 22)
+                .font(.system(size: small ? 10.5 : 12, weight: .medium))
+                .frame(width: small ? 20 : 24, height: small ? 16 : 22)
                 .background(
                     hovering ? Color.primary.opacity(0.12) : .clear,
                     in: RoundedRectangle(cornerRadius: 5)
@@ -586,14 +659,15 @@ struct InlineActionButton: View {
 /// Share via the system share sheet, styled to match InlineActionButton.
 struct InlineShareButton: View {
     let url: URL?
+    var small = false
     @State private var hovering = false
 
     var body: some View {
         if let url {
             ShareLink(item: url) {
                 Image(systemName: "square.and.arrow.up")
-                    .font(.system(size: 12, weight: .medium))
-                    .frame(width: 24, height: 22)
+                    .font(.system(size: small ? 10.5 : 12, weight: .medium))
+                    .frame(width: small ? 20 : 24, height: small ? 16 : 22)
                     .background(
                         hovering ? Color.primary.opacity(0.12) : .clear,
                         in: RoundedRectangle(cornerRadius: 5)
@@ -695,5 +769,40 @@ struct EmptyStateView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 40)
+    }
+}
+
+/// Forces overlay-style scrollers on the enclosing NSScrollView. With
+/// legacy (always-visible) scrollers, which macOS turns on whenever a mouse
+/// is connected, the content area narrows by the scroller's width the
+/// moment a list overflows, and every trailing × jumps 15 pt to the left.
+/// Overlay scrollers draw over the content instead, so the row layout is
+/// the same whether or not the list scrolls.
+struct OverlayScrollers: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        view.setFrameSize(.zero)
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        DispatchQueue.main.async {
+            var current: NSView? = view
+            while let candidate = current, !(candidate is NSScrollView) {
+                current = candidate.superview
+            }
+            guard let scrollView = current as? NSScrollView else { return }
+            if scrollView.scrollerStyle != .overlay {
+                scrollView.scrollerStyle = .overlay
+            }
+            scrollView.autohidesScrollers = true
+        }
+    }
+}
+
+extension View {
+    /// Put this on the content of a ScrollView (see `OverlayScrollers`).
+    func overlayScrollers() -> some View {
+        background(OverlayScrollers().frame(width: 0, height: 0))
     }
 }
