@@ -166,6 +166,36 @@ struct SettingsView: View {
             }
 
             SettingRow(
+                title: "Skip old articles",
+                subtitle: "Articles published more than \(store.settings.maxArticleAgeDays) day\(store.settings.maxArticleAgeDays == 1 ? "" : "s") ago are never added to the inbox. Keeps slow feeds from resurfacing their back catalogue.",
+                onTap: { store.settings.skipOldArticles.toggle() }
+            ) {
+                Toggle("", isOn: $store.settings.skipOldArticles)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+            }
+
+            if store.settings.skipOldArticles {
+                SettingRow(
+                    title: "Maximum article age",
+                    subtitle: "In days, counted from the publish date."
+                ) {
+                    HStack(spacing: 4) {
+                        TextField("", value: maxArticleAgeDays, format: .number)
+                            .labelsHidden()
+                            .textFieldStyle(.roundedBorder)
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 48)
+                        Stepper("", value: maxArticleAgeDays, in: AppSettings.articleAgeDaysRange)
+                            .labelsHidden()
+                        Text("days")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            SettingRow(
                 title: "Start Vestitel at login",
                 subtitle: launchAtLoginError ?? "Opens automatically when you log in to your Mac.",
                 onTap: { launchAtLogin.toggle() }
@@ -220,6 +250,17 @@ struct SettingsView: View {
             )
             .font(.system(size: 11.5))
             .foregroundStyle(.tertiary)
+        }
+    }
+
+    /// Clamps typed values into the allowed range; the stepper enforces it
+    /// on its own.
+    private var maxArticleAgeDays: Binding<Int> {
+        Binding {
+            store.settings.maxArticleAgeDays
+        } set: { days in
+            let r = AppSettings.articleAgeDaysRange
+            store.settings.maxArticleAgeDays = min(max(days, r.lowerBound), r.upperBound)
         }
     }
 

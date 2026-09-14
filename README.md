@@ -135,7 +135,11 @@ docs/                      user documentation and screenshots
 - A 30-second sweep timer promotes read → cleared (after 15 min), purges
   cleared articles older than 24 h, and runs the daily update check.
 - Purged articles won't reappear on the next fetch: ingested article ids are
-  remembered for 30 days (and shared between synced Macs).
+  remembered for 30 days after the last fetch that still listed them (and
+  shared between synced Macs).
+- Optionally (Settings → Behavior → Skip old articles), items published more
+  than N days ago are never added to the inbox, so a slow feed's back
+  catalogue stays out of the way.
 - Removing a feed drops its unread inbox articles but keeps read/cleared
   history and the archive. A removed local source comes back when its
   producer posts again.

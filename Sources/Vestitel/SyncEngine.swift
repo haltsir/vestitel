@@ -309,17 +309,22 @@ extension AppStore {
             }
         }
 
-        // Seen: union, earliest first-seen date wins. This is what keeps an
-        // article cleared on one Mac from ever resurfacing on another.
-        // Entries sweep() would immediately prune are not adopted — otherwise
-        // a locally-pruned id resurrects from any document that still carries
-        // it, and the prune → merge → prune cycle rewrites the sync file (and
-        // keeps the cloud client busy) around every entry aging past
-        // retention.
-        for (id, date) in doc.seen where date < (seen[id] ?? .distantFuture) {
+        // Seen: union, latest date wins. Presence is what keeps an article
+        // cleared on one Mac from ever resurfacing on another; the date is
+        // refreshed by every fetch that still lists the item (see ingest),
+        // so the newest stamp from any Mac is the one that reflects whether
+        // the feed still carries it. Entries sweep() would immediately prune
+        // are not adopted — otherwise a locally-pruned id resurrects from
+        // any document that still carries it, and the prune → merge → prune
+        // cycle rewrites the sync file (and keeps the cloud client busy)
+        // around every entry aging past retention.
+        // A newer date for an id already held is taken quietly: both Macs
+        // refresh the same ids on every fetch, and flagging each of those
+        // would rewrite this Mac's file after every merge.
+        for (id, date) in doc.seen where date > (seen[id] ?? .distantPast) {
             if now.timeIntervalSince(date) >= AppSettings.seenRetention { continue }
+            if seen[id] == nil { changed = true }
             seen[id] = date
-            changed = true
         }
 
         // Bookmarks: tombstoned union.

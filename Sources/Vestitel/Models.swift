@@ -199,6 +199,12 @@ struct AppSettings: Codable, Equatable {
     /// 0...1 — higher groups more aggressively (looser similarity threshold)
     var groupingSensitivity: Double = 0.5
     var maxArticlesPerFeed: Int = 50
+    /// When true, items published more than `maxArticleAgeDays` ago are never
+    /// added to the inbox (marked seen instead). Keeps a slow feed's long
+    /// back catalogue from resurfacing once its seen entries expire. Local
+    /// sources are exempt.
+    var skipOldArticles: Bool = false
+    var maxArticleAgeDays: Int = 30
     /// When true the menu bar icon may use colour (new-article signal,
     /// popover-open head, arrival animation); when false it is strictly
     /// monochrome in every state.
@@ -237,6 +243,8 @@ struct AppSettings: Codable, Equatable {
         groupingEnabled = try c.decodeIfPresent(Bool.self, forKey: .groupingEnabled) ?? true
         groupingSensitivity = try c.decodeIfPresent(Double.self, forKey: .groupingSensitivity) ?? 0.5
         maxArticlesPerFeed = try c.decodeIfPresent(Int.self, forKey: .maxArticlesPerFeed) ?? 50
+        skipOldArticles = try c.decodeIfPresent(Bool.self, forKey: .skipOldArticles) ?? false
+        maxArticleAgeDays = try c.decodeIfPresent(Int.self, forKey: .maxArticleAgeDays) ?? 30
         allowColoredIcon = try c.decodeIfPresent(Bool.self, forKey: .allowColoredIcon) ?? true
         compactRows = try c.decodeIfPresent(Bool.self, forKey: .compactRows) ?? false
         groupBySource = try c.decodeIfPresent(Bool.self, forKey: .groupBySource) ?? false
@@ -249,7 +257,12 @@ struct AppSettings: Codable, Equatable {
 
     static let readClearInterval: TimeInterval = 15 * 60       // 15 minutes
     static let clearedRetention: TimeInterval = 24 * 60 * 60   // 24 hours
-    static let seenRetention: TimeInterval = 30 * 24 * 60 * 60 // don't resurrect purged articles
+    /// How long a seen id outlives the last fetch that still listed the
+    /// item (ingest refreshes the date on every fetch), so purged articles
+    /// never resurrect while a feed keeps carrying them.
+    static let seenRetention: TimeInterval = 30 * 24 * 60 * 60
+    /// Bounds for `maxArticleAgeDays`.
+    static let articleAgeDaysRange = 1...365
 }
 
 // MARK: - Import/export document

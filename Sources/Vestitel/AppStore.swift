@@ -776,11 +776,25 @@ final class AppStore: ObservableObject {
         var added = 0
         // Local sources aren't capped: every posted event was posted on purpose.
         let cap = feed.isLocal ? items.count : settings.maxArticlesPerFeed
+        // Items older than this are skipped (and marked seen) when the
+        // option is on; local events are posted on purpose, so never.
+        let oldestAllowed: Date? = (settings.skipOldArticles && !feed.isLocal)
+            ? now.addingTimeInterval(-Double(settings.maxArticleAgeDays) * 24 * 60 * 60)
+            : nil
         for item in items.prefix(cap) {
             let key = item.guid ?? item.link?.absoluteString ?? item.title
             let id = "\(feed.url.absoluteString)#\(key)"
-            guard seen[id] == nil else { continue }
+            // The seen date is refreshed on every fetch that still lists the
+            // item, so an entry expires 30 days after the feed dropped it,
+            // not 30 days after it was first met: a slow feed that keeps
+            // months of items in its file would otherwise resurrect them
+            // all the moment their first-seen dates aged out.
+            let alreadySeen = seen[id] != nil
             seen[id] = now
+            if alreadySeen { continue }
+            if let oldestAllowed, let published = item.published, published < oldestAllowed {
+                continue
+            }
             if !feed.isLocal, let idx = duplicateIndex(feedID: feed.id, title: item.title) {
                 // Same feed, same title, new guid: a republished story (dir.bg
                 // files one piece under two sections with "-1" appended).

@@ -94,6 +94,16 @@ enum TopicGrouper {
         "хиляди", "милиона", "милиони", "милиарда", "милиарди", "брой",
         "част", "път", "пъти", "коментар", "анализ", "мнение", "интервю",
         "официално", "десетки", "стотици", "заедно",
+        // Bulgarian: ordinals (as "first"/"last" above) and scoreboard
+        // noise: "точки", "първа" and "сезона" are shared by an NFL
+        // opener and a Levski defeat without being the same story
+        "първа", "първи", "първата", "първият", "първо", "първото",
+        "първите", "последна", "последен", "последната", "последният",
+        "последно", "последното", "последните", "следваща", "следващ",
+        "следващата", "следващият", "следващо", "следващото",
+        "следващите",
+        "точки", "точка", "точките", "сезон", "сезона", "сезонът",
+        "мач", "мача", "мачът", "мачове", "мачовете",
         // Bulgarian: months
         "януари", "февруари", "март", "април", "май", "юни", "юли",
         "август", "септември", "октомври", "ноември", "декември",
@@ -161,7 +171,7 @@ enum TopicGrouper {
                 let words = words(in: remainder[openRange.upperBound..<closeRange.lowerBound])
                 remainder.removeSubrange(openRange.lowerBound..<closeRange.upperBound)
                 if words.count > 1 {
-                    let phrase = words.map { normalize($0.lowercased()) }.joined(separator: " ")
+                    let phrase = words.map { stem($0.lowercased()) }.joined(separator: " ")
                     if phrase.count >= 3 {
                         result.tokens.insert(phrase)
                         result.quoted.insert(phrase)
@@ -206,7 +216,7 @@ enum TopicGrouper {
             options: [.omitWhitespace, .omitPunctuation, .joinNames]
         ) { tag, range in
             if let tag, nameTags.contains(tag) {
-                let words = words(in: text[range]).map { normalize($0.lowercased()) }
+                let words = words(in: text[range]).map { stem($0.lowercased()) }
                 if words.count > 1 {
                     phrases.append(words.joined(separator: " "))
                 }
@@ -235,7 +245,7 @@ enum TopicGrouper {
         var run: [String] = []
         func flush() {
             if run.count > 1 {
-                let phrase = run.map { normalize($0.lowercased()) }.joined(separator: " ")
+                let phrase = run.map { stem($0.lowercased()) }.joined(separator: " ")
                 if phrase.count >= 3 { phrases.append(phrase) }
             }
             run = []
@@ -281,47 +291,77 @@ enum TopicGrouper {
         return words
     }
 
-    /// Strip the Bulgarian definite-article suffix so "детска" and
-    /// "детската" become the same keyword. Deliberately context-gated —
-    /// naive suffix stripping mangles words that end in those letters
-    /// naturally ("злато", "място", "карта", "дете"):
-    ///  - -та only after а/я ("жената") or т/щ ("радостта", "нощта");
-    ///    never after other consonants, which is where "карта"/"лента" live
-    ///  - -то only after о/е ("морето", "детето") — "злато"/"място" keep
-    ///  - -те only after и/е ("колите", "мъжете")
-    ///  - -ът always ("градът"); -ят only after a consonant ("конят" → кон,
-    ///    but "краят" keeps its я — it's the stem's elided й, край)
-    /// The stem must keep ≥3 characters ("дете" survives its -те ending).
-    private static func normalize(_ word: String) -> String {
-        guard let last = word.unicodeScalars.last,
-              (0x400...0x4FF).contains(last.value) else { return word }
-        for ending in ["ата", "ята", "тта", "щта", "ото", "ето", "ите", "ете"]
-        where word.hasSuffix(ending) {
-            let stem = String(word.dropLast(2))
-            return stem.count >= 3 ? stem : word
+    /// Light Bulgarian stemmer, so the inflected forms of one word compare
+    /// as one token: "точки"/"точка"/"точките" → "точк", "хусите"/"хуси" →
+    /// "хус", "сезона"/"сезонът" → "сезон", "градът"/"градове" → "град".
+    /// A fresh implementation of the suffix-stripping algorithm in J. Savoy,
+    /// "Searching strategies for the Bulgarian language" (Information
+    /// Retrieval 10, 2007), the one Lucene ships for Bulgarian: strip the
+    /// definite article, then plural endings, then a final vowel, then the
+    /// fleeting "е"/"ъ" of "-ен"/"-ъN" stems. Nouns and adjectives are the
+    /// target; verb conjugation is left alone. Applied only to all-Cyrillic
+    /// words of four or more letters; everything else (Latin words,
+    /// hyphenated compounds, numbers) is returned unchanged. Stems are
+    /// internal keys, never shown: the headline recovers the display form
+    /// from the titles.
+    static func stem(_ word: String) -> String {
+        guard word.count >= 4, word.unicodeScalars.allSatisfy({ (0x400...0x4FF).contains($0.value) })
+        else { return word }
+        var s = Array(word)
+        func ends(_ suffix: String) -> Bool { s.count >= suffix.count && s.suffix(suffix.count).elementsEqual(suffix) }
+
+        if s.count > 5, ends("ища") { return String(s.dropLast(3)) }
+
+        // definite article
+        if s.count > 6, ends("ият") {
+            s.removeLast(3)
+        } else if s.count > 5, ends("ът") || ends("то") || ends("те") || ends("та") || ends("ия") {
+            s.removeLast(2)
+        } else if s.count > 4, ends("ят") {
+            s.removeLast(2)
         }
-        if word.hasSuffix("ът") {
-            let stem = String(word.dropLast(2))
-            return stem.count >= 3 ? stem : word
+
+        // plural
+        if s.count > 6, ends("овци") {
+            s.removeLast(3)
+        } else if s.count > 6, ends("ове") {
+            s.removeLast(3)
+        } else if s.count > 6, ends("еве") {
+            s.removeLast(3); s.append("й")
+        } else if s.count > 5, ends("ища") {
+            s.removeLast(3)
+        } else if s.count > 5, ends("та") {
+            s.removeLast(2)
+        } else if s.count > 5, ends("ци") {
+            s.removeLast(2); s.append("к")
+        } else if s.count > 4, ends("си") {
+            s.removeLast(2); s.append("х")
+        } else if s.count > 4, ends("и") {
+            s.removeLast()
         }
-        if word.hasSuffix("ят") {
-            let stem = String(word.dropLast(2))
-            if stem.count >= 3, let c = stem.last, !"аъоуеияюй".contains(c) {
-                return stem
-            }
+
+        // final vowel
+        if s.count > 3 {
+            if ends("я") { s.removeLast() }
+            if ends("а") || ends("о") || ends("е") { s.removeLast() }
         }
-        return word
+        // fleeting vowels: "студен" → "студн", "театър" → "театр"
+        if s.count > 4, ends("ен") {
+            s.removeLast(2); s.append("н")
+        }
+        if s.count > 5, s[s.count - 2] == "ъ" {
+            s.remove(at: s.count - 2)
+        }
+        return String(s)
     }
 
     private static func insertWord(_ word: String, into result: inout Set<String>) {
         let raw = word.lowercased()
-        let word = normalize(raw)
-        // both forms checked: "годината" normalizes into the stopword
-        // "година"; "правят" is a stopword only in its raw form
-        if word.count >= 3, !stopwords.contains(raw), !stopwords.contains(word),
-           Int(word) == nil {
-            result.insert(word)
-        }
+        // The stopword list holds surface forms and is checked before
+        // stemming, so a stopword's stem never swallows a real word that
+        // happens to share it ("прави" → "прав" must not drop "право").
+        guard raw.count >= 3, !stopwords.contains(raw), Int(raw) == nil else { return }
+        result.insert(stem(raw))
     }
 
     static func group(_ articles: [Article], sensitivity: Double) -> [TopicGroup] {
@@ -489,9 +529,6 @@ enum TopicGrouper {
             var position: Int    // word index in the newest title (Int.max if absent)
             var words: Int       // how many words the pick spans there
         }
-        func wordIndex(of range: Range<String.Index>, in title: String) -> Int {
-            title[..<range.lowerBound].split(whereSeparator: { !$0.isLetter && !$0.isNumber }).count
-        }
         var picks: [Pick] = []
         for (order, token) in common.enumerated() {
             var display: String? = nil
@@ -499,19 +536,28 @@ enum TopicGrouper {
             var position = Int.max
             let words = token.split(separator: " ").count
             if token.contains(" ") {
-                for (t, title) in titles.enumerated() {
-                    if let range = title.range(of: token, options: .caseInsensitive) {
-                        display = String(title[range])
-                        if t == 0 { position = wordIndex(of: range, in: title) }
-                        break
+                // Phrase tokens are stemmed word by word, so find the run of
+                // title words with the same stems and show it as written
+                // ("златн лъв" is recovered as „Златен лъв“).
+                let parts = token.split(separator: " ").map(String.init)
+                outer: for (t, title) in titles.enumerated() {
+                    let titleWords = title.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+                    guard titleWords.count >= parts.count else { continue }
+                    for start in 0...(titleWords.count - parts.count) {
+                        let window = titleWords[start..<start + parts.count]
+                        if window.map({ stem($0.lowercased()) }) == parts {
+                            display = String(title[window.first!.startIndex..<window.last!.endIndex])
+                            if t == 0 { position = start }
+                            break outer
+                        }
                     }
                 }
             } else {
                 outer: for (t, title) in titles.enumerated() {
                     for (w, word) in title.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).enumerated() {
-                        // normalized compare: token "детска" is recovered
-                        // from a title that spells it "Детската"
-                        if normalize(word.lowercased()) == token {
+                        // stemmed compare: token "детск" is recovered from
+                        // a title that spells it "Детската"
+                        if stem(word.lowercased()) == token {
                             display = String(word)
                             proper = w > 0 && (word.first?.isUppercase ?? false)
                             if t == 0 { position = w }
@@ -522,6 +568,16 @@ enum TopicGrouper {
             }
             picks.append(Pick(display: display ?? token.capitalized, isPhrase: token.contains(" "),
                               isProper: proper, order: order, position: position, words: words))
+        }
+        // A capitalised word that opens the newest title right before a
+        // proper pick is the first half of that name ("Асен" before
+        // "Василев"): rank it with the names so the pair survives the cut.
+        for i in picks.indices where !picks[i].isProper && picks[i].position == 0
+            && picks[i].display.first?.isUppercase == true {
+            let next = picks[i].position + picks[i].words
+            if picks.contains(where: { $0.isProper && $0.position == next }) {
+                picks[i].isProper = true
+            }
         }
         picks.sort {
             if $0.isPhrase != $1.isPhrase { return $0.isPhrase }

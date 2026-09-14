@@ -13,7 +13,8 @@ struct TopicGrouperTests {
     @Test @MainActor func capitalisedRunsInCyrillicTitlesBecomeNamePhrases() {
         let t = TopicGrouper.tokens("Филмът Woman Unknown спечели „Златен лъв“ на кинофестивала във Венеция")
         #expect(t.names.contains("woman unknown"))
-        #expect(t.quoted.contains("златен лъв"))
+        // phrase tokens are stemmed word by word ("златен" → "златн")
+        #expect(t.quoted.contains("златн лъв"))
         // components stay in the set, as with English named entities
         #expect(t.tokens.contains("unknown"))
         // the sentence-initial Cyrillic word never starts a name run
@@ -21,6 +22,48 @@ struct TopicGrouperTests {
         #expect(!lead.names.contains("матилд арсел"))
         let mid = TopicGrouper.tokens("Актрисата Матилд Арсел спечели купа")
         #expect(mid.names.contains("матилд арсел"))
+    }
+
+    @Test @MainActor func genericSharedWordsAloneDoNotLink() {
+        // Scoreboard words (точки, първа, сезона) are stopwords: two
+        // unrelated sports stories from the same day share nothing else.
+        let articles = [
+            article("96 точки! НФЛ регистрира най-резултатния откриващ мач в първата неделя от сезона"),
+            article("\"Левски\" с първа грешна стъпка за сезона, загуби точки във Враца", minutesAgo: 780),
+        ]
+        #expect(TopicGrouper.group(articles, sensitivity: 0.5).count == 2)
+        // Three shared topical words still link, even though the wording
+        // differs too much for the Jaccard path.
+        let anchored = [
+            article("Лавина уби най-малко 11 алпинисти в Северен Кавказ, издирват още шестима туристи"),
+            article("Спасители откриха телата на алпинисти след лавина в Кавказ, търсенето продължава", minutesAgo: 60),
+        ]
+        #expect(TopicGrouper.group(anchored, sensitivity: 0.5).count == 1)
+    }
+
+    @Test @MainActor func stemmerFoldsInflections() {
+        for (forms, stem) in [
+            (["точки", "точка", "точките"], "точк"),
+            (["хусите", "хуси"], "хуси"),
+            (["сезона", "сезонът", "сезон"], "сезон"),
+            (["градът", "градове", "града"], "град"),
+            (["наркодилър", "наркодилъра"], "наркодилр"),
+            (["детската", "детска"], "детск"),
+        ] {
+            for form in forms { #expect(TopicGrouper.stem(form) == stem, "\(form)") }
+        }
+        // short words, Latin words and compounds with digits are untouched
+        #expect(TopicGrouper.stem("май") == "май")
+        #expect(TopicGrouper.stem("iphone") == "iphone")
+        #expect(TopicGrouper.stem("22-годишна") == "22-годишна")
+    }
+
+    @Test @MainActor func inflectedTitlesLink() {
+        let articles = [
+            article("Издирват паднал делтапарапланерист край връх Голям Кадемлия"),
+            article("Падналият парапланерист край връх Голям Кадемлия е загинал", minutesAgo: 60),
+        ]
+        #expect(TopicGrouper.group(articles, sensitivity: 0.5).count == 1)
     }
 
     @Test @MainActor func latinTitlesAreNotSplitIntoRuns() {
