@@ -104,6 +104,11 @@ enum TopicGrouper {
         "следващите",
         "точки", "точка", "точките", "сезон", "сезона", "сезонът",
         "мач", "мача", "мачът", "мачове", "мачовете",
+        // Bulgarian: currencies and units (as "million"/"percent" above):
+        // every price story shares "долара", none of them is one story
+        "долар", "долара", "долари", "доларът", "евро", "евра", "лев",
+        "лева", "левът", "лв", "барел", "барела", "галон", "галона",
+        "цент", "цента",
         // Bulgarian: months
         "януари", "февруари", "март", "април", "май", "юни", "юли",
         "август", "септември", "октомври", "ноември", "декември",
@@ -160,6 +165,7 @@ enum TopicGrouper {
         var result = TitleTokens()
         // Original case, not lowercased: the name tagger keys on capitals.
         var remainder = title
+        if let body = rubricBodyStart(title) { remainder = String(title[body...]) }
 
         // Quoted text is one keyword: „Има такъв народ“ should link titles
         // quoting the same name, not leak its individual (often generic)
@@ -199,6 +205,27 @@ enum TopicGrouper {
         }
         tokenCache[title] = result
         return result
+    }
+
+    /// Where the title proper starts after a rubric label ("Бизнес глобус:",
+    /// "Три минути:", "Снимка на деня:", "Гледайте на живо:"), or nil.
+    /// A column name shared by a feed's daily digests would otherwise count
+    /// as two shared tokens between every pair of them and chain unrelated
+    /// digests into one group. A rubric is two or three words before the
+    /// first colon or bar, every word after the first lowercase, no digit;
+    /// a speaker attribution ("Асен Василев:", "Радев:", "Официално от
+    /// ЦСКА:") carries a capital or is a single word and stays, as does a
+    /// score ("0:0").
+    private static func rubricBodyStart(_ title: String) -> String.Index? {
+        let window = title.index(title.startIndex, offsetBy: 40, limitedBy: title.endIndex) ?? title.endIndex
+        guard let colon = title[..<window].firstIndex(where: { $0 == ":" || $0 == "|" }) else { return nil }
+        let prefix = title[..<colon]
+        guard !prefix.contains(where: \.isNumber) else { return nil }
+        let words = words(in: prefix)
+        guard (2...3).contains(words.count),
+              words.dropFirst().allSatisfy({ $0.first?.isLowercase == true })
+        else { return nil }
+        return title.index(after: colon)
     }
 
     private static let nameTagger = NLTagger(tagSchemes: [.nameType])
@@ -458,7 +485,7 @@ enum TopicGrouper {
             if members.count == 1 {
                 return singleton(members[0])
             }
-            let headline = headline(for: indices.map { tokenSets[$0].tokens },
+            let headline = headline(for: indices.map { tokenSets[$0] },
                                     titles: indices.map { articles[$0].title })
             return TopicGroup(
                 id: members.map(\.id).sorted().joined(separator: "|"),
@@ -502,10 +529,26 @@ enum TopicGrouper {
     /// so phrases rank above capitalised words, which rank above the rest,
     /// and two or more phrases make a complete label on their own. The
     /// picks are shown in the order they appear in the newest title.
-    private static func headline(for tokenSets: [Set<String>], titles: [String]) -> String {
+    /// In how many titles the word stemming to `first` is directly
+    /// followed by the word stemming to `second`, with nothing but
+    /// whitespace, brackets or quotes between them: "Локо (София)" is one
+    /// name, "Иран: Войната" is not.
+    private static func adjacentCount(_ first: String, _ second: String, in titles: [String]) -> Int {
+        titles.filter { title in
+            let words = title.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            return zip(words, words.dropFirst()).contains { a, b in
+                stem(a.lowercased()) == first && stem(b.lowercased()) == second
+                    && title[a.endIndex..<b.startIndex].allSatisfy { $0.isWhitespace || "()„“”\"«»".contains($0) }
+            }
+        }.count
+    }
+
+    private static func headline(for tokenSets: [TitleTokens], titles: [String]) -> String {
         var counts: [String: Int] = [:]
+        var quotedTokens = Set<String>()
         for set in tokenSets {
-            for t in set { counts[t, default: 0] += 1 }
+            for t in set.tokens { counts[t, default: 0] += 1 }
+            quotedTokens.formUnion(set.quoted)
         }
         let majority = (tokenSets.count + 1) / 2
         let candidates = counts.filter { $0.value > majority || $0.value == tokenSets.count }
@@ -522,8 +565,10 @@ enum TopicGrouper {
         guard !common.isEmpty else { return "Related stories" }
 
         struct Pick {
+            var token: String
             var display: String
             var isPhrase: Bool
+            var isQuoted: Bool   // a quoted phrase: shown in „…“ so "Да, България" reads as one unit
             var isProper: Bool   // capitalised somewhere other than a title's first word
             var order: Int       // candidate rank (count, then alphabetical)
             var position: Int    // word index in the newest title (Int.max if absent)
@@ -559,14 +604,17 @@ enum TopicGrouper {
                         // a title that spells it "Детската"
                         if stem(word.lowercased()) == token {
                             display = String(word)
-                            proper = w > 0 && (word.first?.isUppercase ?? false)
+                            // capitalised mid-title, or an acronym anywhere ("САЩ", "ВСС")
+                            proper = (w > 0 && (word.first?.isUppercase ?? false))
+                                || (word.count >= 2 && word.allSatisfy(\.isUppercase))
                             if t == 0 { position = w }
                             break outer
                         }
                     }
                 }
             }
-            picks.append(Pick(display: display ?? token.capitalized, isPhrase: token.contains(" "),
+            picks.append(Pick(token: token, display: display ?? token.capitalized, isPhrase: token.contains(" "),
+                              isQuoted: quotedTokens.contains(token),
                               isProper: proper, order: order, position: position, words: words))
         }
         // A capitalised word that opens the newest title right before a
@@ -585,20 +633,53 @@ enum TopicGrouper {
             return $0.order < $1.order
         }
         let phraseCount = picks.filter(\.isPhrase).count
-        let chosen = picks.prefix(phraseCount >= 2 ? min(phraseCount, 3) : 3)
-            .sorted { $0.position < $1.position }
+        let names = Array(picks.filter { $0.isPhrase || $0.isProper }.prefix(3))
+        let plainPicks = picks.filter { !($0.isPhrase || $0.isProper) }
+        var chosen: [Pick]
+        if phraseCount >= 2 {
+            chosen = Array(picks.prefix(min(phraseCount, 3)))
+        } else if names.isEmpty {
+            chosen = Array(plainPicks.prefix(3))
+        } else {
+            // Once a name or phrase identifies the story, one plain word is
+            // enough to say what about it: "„Да, България“ · помилвани", not
+            // "Да, България · документи · помилвани". The plain word that
+            // completes a name ("Стара планина", "Шампионската лига") beats
+            // a better-ranked one elsewhere: it must follow that name in
+            // most of the titles, so a one-off "Русия атака" doesn't pass
+            // for a name, and the name must be a capitalised word rather
+            // than an acronym: "ЕЦБ повиши" is a sentence, not a name.
+            let completing = plainPicks.first { plain in
+                names.contains { name in
+                    !name.isPhrase && !name.display.allSatisfy(\.isUppercase)
+                        && adjacentCount(name.token, plain.token, in: titles) * 2 > titles.count
+                }
+            }
+            chosen = names
+            if names.count < 3, let plain = completing ?? plainPicks.first { chosen.append(plain) }
+        }
+        chosen.sort { $0.position < $1.position }
         // Adjacent capitalised picks are one name: "Асен Василев" opens its
         // titles, so the tokenizer (which skips the sentence-initial word)
         // never made it a phrase, but shown side by side it reads as one.
         var parts: [String] = []
         var previous: Pick? = nil
         for pick in chosen {
-            if let last = previous, !parts.isEmpty,
+            let display = pick.isQuoted ? "„" + pick.display + "“" : pick.display
+            // Adjacent picks join when both are capitalised (and really
+            // adjacent somewhere: "Иран: Войната" is not "Иран Войната"),
+            // or when a plain word follows a name it completes in most
+            // titles ("Стара планина").
+            let adjacent = previous.map { adjacentCount($0.token, pick.token, in: titles) } ?? 0
+            if let last = previous, !parts.isEmpty, !pick.isQuoted, !last.isQuoted,
+               !pick.isPhrase, !last.isPhrase,
                pick.position != Int.max, pick.position == last.position + last.words,
-               last.display.first?.isUppercase == true, pick.display.first?.isUppercase == true {
-                parts[parts.count - 1] += " " + pick.display
+               last.display.first?.isUppercase == true,
+               (pick.display.first?.isUppercase == true && adjacent > 0)
+                || (last.isProper && !pick.isProper && adjacent * 2 > titles.count) {
+                parts[parts.count - 1] += " " + display
             } else {
-                parts.append(pick.display)
+                parts.append(display)
             }
             previous = pick
         }

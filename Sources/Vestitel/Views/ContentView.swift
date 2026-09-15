@@ -642,7 +642,7 @@ struct RowActionButton: View {
         .allowsHitTesting(visible)
         .debouncedHover($hovering, enabled: visible)
         .hoverRefresh($hovering, enabled: visible)
-        .animation(quiet ? nil : .easeOut(duration: 0.12), value: hovering)
+
         .help(help)
     }
 }
@@ -730,17 +730,16 @@ struct GroupBanner: View {
     }
 }
 
-/// The one look for every icon button on a row: a box that darkens on
-/// hover. The × and Open in Browser keep a faint box at rest; the
-/// bookmark/link/share bar is `quiet`: nothing at rest, and the hover fill
-/// appears in one step (no animation), because a background fading in
-/// from transparent is what reads as a blink.
+/// The one look for every icon button on a row: nothing at rest, a box
+/// that appears in one step on hover (no animation, because a background
+/// fading in from transparent is what reads as a blink). `quiet` only
+/// dims the icon a little more at rest (the bookmark/link/share bar).
 extension Image {
     func rowActionLook(hovering: Bool, tint: Color, small: Bool = false, quiet: Bool = false) -> some View {
         font(.system(size: small ? 11 : 13, weight: .medium))
             .frame(width: small ? 22 : 26, height: small ? 20 : 26)
             .background(
-                Color.primary.opacity(hovering ? 0.18 : (quiet ? 0 : 0.07)),
+                Color.primary.opacity(hovering ? 0.18 : 0),
                 in: RoundedRectangle(cornerRadius: small ? 5 : 6)
             )
             .foregroundStyle(hovering ? tint.opacity(1) : tint.opacity(quiet ? 0.7 : 0.85))

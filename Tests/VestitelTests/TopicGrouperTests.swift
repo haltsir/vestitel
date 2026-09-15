@@ -66,6 +66,35 @@ struct TopicGrouperTests {
         #expect(TopicGrouper.group(articles, sensitivity: 0.5).count == 1)
     }
 
+    @Test @MainActor func rubricPrefixesAreDroppedButAttributionsKept() {
+        let rubric = TopicGrouper.tokens("Бизнес глобус: Euronext е отворена за сделка с Deutsche Börse")
+        #expect(!rubric.tokens.contains("бизнес"))
+        #expect(!rubric.tokens.contains("глобус"))
+        #expect(rubric.tokens.contains("euronext"))
+        let speaker = TopicGrouper.tokens("Асен Василев: Йотова да се оттегли от надпреварата")
+        #expect(speaker.tokens.contains("асен"))
+        let single = TopicGrouper.tokens("Радев: В ГЕРБ има страх и объркване")
+        #expect(single.tokens.contains("радев"))
+        let score = TopicGrouper.tokens("Левски - ЦСКА 0:0, изненадващ титуляр")
+        #expect(score.tokens.contains("левск"))
+        // Digest columns of the same rubric no longer share anything
+        let digests = [
+            article("Бизнес глобус: Paramount обмисля да закрие SkyShowtime; Exein привлече 270 млн. долара"),
+            article("Бизнес глобус: Дизелът в САЩ надхвърли 6 долара за галон; Microsoft утроява капацитета си", minutesAgo: 60),
+        ]
+        #expect(TopicGrouper.group(digests, sensitivity: 0.5).count == 2)
+    }
+
+    @Test @MainActor func headlineKeepsOnePlainWordNextToAName() {
+        let articles = [
+            article("От \"Да, България\" поискаха документи за петима помилвани наркотрафиканти"),
+            article("\"Отговорът на Йотова не дава яснота\": \"Да, България\" ще иска всички документи за помилвания наркобос", minutesAgo: 60),
+        ]
+        let groups = TopicGrouper.group(articles, sensitivity: 0.5)
+        #expect(groups.count == 1)
+        #expect(groups.first?.headline == "„Да, България“ · документи")
+    }
+
     @Test @MainActor func latinTitlesAreNotSplitIntoRuns() {
         let t = TopicGrouper.tokens("Woman Unknown Wins Golden Lion At Venice Film Festival")
         #expect(!t.names.contains("woman unknown wins golden lion"))
@@ -79,7 +108,7 @@ struct TopicGrouperTests {
         ]
         let groups = TopicGrouper.group(articles, sensitivity: 1)
         #expect(groups.count == 1)
-        #expect(groups.first?.headline == "Златен лъв · Woman Unknown")
+        #expect(groups.first?.headline == "„Златен лъв“ · Woman Unknown")
     }
 
     @Test @MainActor func headlineJoinsAdjacentCapitalisedPicks() {
