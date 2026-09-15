@@ -1071,6 +1071,9 @@ final class AppStore: ObservableObject {
             $0.clearedAt = nil
             $0.readAt = nil
             $0.filteredBy = nil
+            // the stamp that lets this restore win over the other Macs'
+            // cleared records of the article (see mergeSyncDocument)
+            $0.restoredAt = Date()
         }
         save()
     }

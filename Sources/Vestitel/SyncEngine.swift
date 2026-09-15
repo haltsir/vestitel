@@ -215,8 +215,10 @@ extension AppStore {
     /// Merge one remote machine's document into local state. Returns true if
     /// anything changed. Rules: unions everywhere, tombstones beat records
     /// they postdate, cleared beats inbox (bias toward hiding — the whole
-    /// point of sync is not seeing things twice), earliest timestamps win so
-    /// countdowns (read → clear, cleared → purge) don't restart per machine.
+    /// point of sync is not seeing things twice) unless the article was
+    /// restored after that clear (`restoredAt`, the latest action wins),
+    /// earliest timestamps win so countdowns (read → clear, cleared → purge)
+    /// don't restart per machine.
     private func mergeSyncDocument(_ doc: SyncDocument) -> Bool {
         var changed = false
         let now = Date()
@@ -267,10 +269,20 @@ extension AppStore {
                   let localFeed = localFeedByURL[remoteFeed.url.absoluteString] else { continue }
             if let idx = localIndexByID[remote.id] {
                 var a = articles[idx]
-                if let readAt = remote.readAt, readAt < (a.readAt ?? .distantFuture) {
+                // A restore is the latest action on the article: remote
+                // read/cleared records from before it are stale (the other
+                // Mac adopted our own earlier clear and still carries it),
+                // and would otherwise re-clear the article within seconds
+                // of every restore. Latest stamp from any Mac is kept.
+                if let restoredAt = remote.restoredAt, restoredAt > (a.restoredAt ?? .distantPast) {
+                    a.restoredAt = restoredAt
+                }
+                let restoredAt = a.restoredAt ?? .distantPast
+                if let readAt = remote.readAt, readAt > restoredAt,
+                   readAt < (a.readAt ?? .distantFuture) {
                     a.readAt = readAt
                 }
-                if remote.state == .cleared {
+                if remote.state == .cleared, (remote.clearedAt ?? .distantPast) > restoredAt || a.restoredAt == nil {
                     if a.state == .inbox {
                         a.state = .cleared
                         a.clearedAt = remote.clearedAt ?? now
@@ -278,6 +290,15 @@ extension AppStore {
                               clearedAt < (a.clearedAt ?? .distantFuture) {
                         a.clearedAt = clearedAt
                     }
+                } else if remote.state == .inbox, a.state == .cleared,
+                          let remoteRestore = remote.restoredAt,
+                          remoteRestore > (a.clearedAt ?? .distantPast) {
+                    // restored on the other Mac after this one cleared it
+                    a.state = .inbox
+                    a.clearedAt = nil
+                    a.readAt = nil
+                    a.filteredBy = nil
+                    a.fetchedAt = now   // arrives like a new article: inbox hold applies
                 }
                 if a != articles[idx] {
                     articles[idx] = a

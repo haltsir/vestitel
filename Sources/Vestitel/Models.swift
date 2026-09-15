@@ -62,6 +62,11 @@ struct Article: Identifiable, Codable, Hashable {
     /// Cleared tab can show what the filters caught. nil = cleared by hand
     /// or by the read countdown.
     var filteredBy: String? = nil
+    /// When the user last put this article back in the inbox. Sync treats
+    /// it as the latest action on the article: a remote cleared or read
+    /// record older than it is stale and does not re-clear the article
+    /// here, and a remote restore newer than the local clear restores it.
+    var restoredAt: Date? = nil
 
     var isRead: Bool { readAt != nil }
     var isFiltered: Bool { filteredBy != nil }

@@ -54,7 +54,8 @@ remembered in **Archive**; anything you want to keep is a **Bookmark**.
 - **Sync between Macs**: point every Mac at the same cloud folder (Google
   Drive, iCloud Drive…). Feeds, read/cleared state, bookmarks and the
   never-show-again list merge with no conflicts: each Mac writes only its own
-  file. Preferences stay per Mac unless you turn on preference sync, after
+  file. Clearing on one Mac clears everywhere, and restoring an article
+  from Cleared sticks: the latest action wins. Preferences stay per Mac unless you turn on preference sync, after
   which the newest change wins everywhere.
 - **Desktop widget**: a big copy of the Inbox that lives on the desktop
   under your windows, in huge type, with new articles sliding in on top as
