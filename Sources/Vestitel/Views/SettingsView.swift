@@ -197,7 +197,7 @@ struct SettingsView: View {
 
             SettingRow(
                 title: "Desktop widget",
-                subtitle: "A big copy of the Inbox on the desktop, under your windows. Drag it by its background, resize it by its edges; new articles slide in on top.",
+                subtitle: "A big copy of the Inbox on the desktop, under your windows. Move it by the grabber at its top, resize it by its edges, scroll or drag the list; new articles slide in on top.",
                 onTap: { store.settings.desktopWidgetEnabled.toggle() }
             ) {
                 Toggle("", isOn: $store.settings.desktopWidgetEnabled)
@@ -208,16 +208,20 @@ struct SettingsView: View {
             if store.settings.desktopWidgetEnabled {
                 SettingRow(
                     title: "Widget text size",
-                    subtitle: "How big the titles are."
+                    subtitle: "Title size in points; the rest scales with it."
                 ) {
-                    Picker("", selection: $store.settings.desktopWidgetTitleSize) {
-                        Text("Large").tag(24.0)
-                        Text("Huge").tag(32.0)
-                        Text("Giant").tag(44.0)
+                    HStack(spacing: 4) {
+                        TextField("", value: widgetTitleSize, format: .number)
+                            .labelsHidden()
+                            .textFieldStyle(.roundedBorder)
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 48)
+                        Stepper("", value: widgetTitleSize, in: AppSettings.widgetTitleSizeRange, step: 2)
+                            .labelsHidden()
+                        Text("pt")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
                     }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .frame(width: 190)
                 }
             }
 
@@ -276,6 +280,15 @@ struct SettingsView: View {
             )
             .font(.system(size: 11.5))
             .foregroundStyle(.tertiary)
+        }
+    }
+
+    private var widgetTitleSize: Binding<Int> {
+        Binding {
+            Int(store.settings.desktopWidgetTitleSize.rounded())
+        } set: { size in
+            let r = AppSettings.widgetTitleSizeRange
+            store.settings.desktopWidgetTitleSize = Double(min(max(size, r.lowerBound), r.upperBound))
         }
     }
 

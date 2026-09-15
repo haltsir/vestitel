@@ -275,6 +275,8 @@ struct AppSettings: Codable, Equatable {
     static let seenRetention: TimeInterval = 30 * 24 * 60 * 60
     /// Bounds for `maxArticleAgeDays`.
     static let articleAgeDaysRange = 1...365
+    /// Bounds for `desktopWidgetTitleSize`, in points.
+    static let widgetTitleSizeRange = 16...96
 }
 
 // MARK: - Import/export document

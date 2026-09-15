@@ -56,7 +56,9 @@ final class DesktopWidgetController {
         )
         panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) - 1)
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenNone]
-        panel.isMovableByWindowBackground = true
+        // Dragging the list pans it; the window moves by the grabber at
+        // the top (WindowDragHandle) and resizes by its edges.
+        panel.isMovableByWindowBackground = false
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
@@ -118,42 +120,133 @@ final class DesktopWidgetController {
 }
 
 /// The widget's content: the Inbox, newest first, in huge type. Rows animate
-/// in from the top as the store's inbox changes.
+/// in from the top as the store's inbox changes. The list scrolls without a
+/// scrollbar, by wheel or trackpad and by press-and-drag on the rows: a
+/// hand-rolled offset rather than a ScrollView, because ScrollView has no
+/// click-drag panning on macOS and a bare offset is what makes both work.
 struct DesktopWidgetView: View {
     @EnvironmentObject var store: AppStore
+    @State private var offset: CGFloat = 0
+    @State private var dragStart: CGFloat? = nil
+    @State private var contentHeight: CGFloat = 0
 
-    private static let maxRows = 40
+    private static let maxRows = 60
 
     var body: some View {
         let articles = Array(store.inbox.prefix(Self.maxRows))
         let titleSize = store.settings.desktopWidgetTitleSize
-        ScrollView {
-            if articles.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: "tray")
-                        .font(.system(size: titleSize * 1.4, weight: .light))
-                    Text("Inbox zero")
-                        .font(.system(size: titleSize * 0.8, weight: .semibold))
+        VStack(spacing: 0) {
+            WindowDragHandle()
+                .frame(height: 22)
+                .overlay {
+                    Capsule()
+                        .fill(Color.primary.opacity(0.25))
+                        .frame(width: 40, height: 5)
+                        .allowsHitTesting(false)
                 }
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity)
-                .padding(.top, titleSize * 2)
-            } else {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(articles) { article in
-                        DesktopWidgetRow(article: article, titleSize: titleSize)
-                            .transition(.asymmetric(
-                                insertion: .move(edge: .top).combined(with: .opacity),
-                                removal: .opacity
-                            ))
+            GeometryReader { geo in
+                let viewport = geo.size.height
+                let maxOffset = max(0, contentHeight - viewport)
+                Group {
+                    if articles.isEmpty {
+                        VStack(spacing: 8) {
+                            Image(systemName: "tray")
+                                .font(.system(size: titleSize * 1.4, weight: .light))
+                            Text("Inbox zero")
+                                .font(.system(size: titleSize * 0.8, weight: .semibold))
+                        }
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, titleSize * 2)
+                    } else {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(articles) { article in
+                                DesktopWidgetRow(article: article, titleSize: titleSize)
+                                    .transition(.asymmetric(
+                                        insertion: .move(edge: .top).combined(with: .opacity),
+                                        removal: .opacity
+                                    ))
+                            }
+                        }
+                        .padding(.bottom, 10)
                     }
                 }
-                .padding(.vertical, 10)
+                .frame(width: geo.size.width, alignment: .top)
+                .background(GeometryReader { inner in
+                    // measured directly (a preference set here was never
+                    // delivered past the outer GeometryReader)
+                    Color.clear
+                        .onAppear { contentHeight = inner.size.height }
+                        .onChange(of: inner.size.height) { _, h in contentHeight = h }
+                })
+                .offset(y: -min(offset, maxOffset))
+                .frame(width: geo.size.width, height: viewport, alignment: .top)
+                .clipped()
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 4, coordinateSpace: .global)
+                        .onChanged { value in
+                            if dragStart == nil { dragStart = offset }
+                            offset = min(max((dragStart ?? 0) - value.translation.height, 0), maxOffset)
+                        }
+                        .onEnded { _ in dragStart = nil }
+                )
+                .background(ScrollWheelCatcher { delta in
+                    offset = min(max(offset - delta, 0), maxOffset)
+                })
+                .animation(.spring(response: 0.5, dampingFraction: 0.85), value: articles.map(\.id))
             }
         }
-        .scrollIndicators(.hidden)
-        .animation(.spring(response: 0.5, dampingFraction: 0.85), value: articles.map(\.id))
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// A strip that moves the window when pressed and dragged (the panel is
+/// not movable by its background, since dragging the list pans it).
+private struct WindowDragHandle: NSViewRepresentable {
+    final class HandleView: NSView {
+        override func mouseDown(with event: NSEvent) {
+            window?.performDrag(with: event)
+        }
+        override var mouseDownCanMoveWindow: Bool { false }
+    }
+    func makeNSView(context: Context) -> HandleView { HandleView() }
+    func updateNSView(_ view: HandleView, context: Context) {}
+}
+
+/// Feeds wheel and trackpad scrolling to the caller. A local event monitor
+/// rather than an NSView in the responder chain: a representable under
+/// SwiftUI content would win AppKit hit-testing and swallow the clicks.
+private struct ScrollWheelCatcher: NSViewRepresentable {
+    let onScroll: (CGFloat) -> Void
+
+    final class Coordinator {
+        var monitor: Any?
+        weak var view: NSView?
+        var onScroll: (CGFloat) -> Void
+        init(onScroll: @escaping (CGFloat) -> Void) { self.onScroll = onScroll }
+        deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(onScroll: onScroll) }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        context.coordinator.view = view
+        context.coordinator.monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+            guard let v = context.coordinator.view, let window = v.window, event.window === window else { return event }
+            let point = v.convert(event.locationInWindow, from: nil)
+            guard v.bounds.contains(point) else { return event }
+            // precise deltas (trackpad) are points; a mouse wheel reports
+            // lines, scaled up so a notch moves a readable amount
+            let delta = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.scrollingDeltaY * 12
+            context.coordinator.onScroll(delta)
+            return nil
+        }
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        context.coordinator.onScroll = onScroll
     }
 }
 
