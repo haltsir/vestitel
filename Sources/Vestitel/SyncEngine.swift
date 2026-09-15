@@ -41,6 +41,10 @@ extension AppStore {
         var shared = s
         shared.syncFolderPath = nil
         shared.syncPreferences = false
+        // the desktop widget is per-Mac: screens, and taste, differ
+        shared.desktopWidgetEnabled = false
+        shared.desktopWidgetTitleSize = 32
+        shared.desktopWidgetFrame = nil
         return shared
     }
 

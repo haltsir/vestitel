@@ -196,6 +196,32 @@ struct SettingsView: View {
             }
 
             SettingRow(
+                title: "Desktop widget",
+                subtitle: "A big copy of the Inbox on the desktop, under your windows. Drag it by its background, resize it by its edges; new articles slide in on top.",
+                onTap: { store.settings.desktopWidgetEnabled.toggle() }
+            ) {
+                Toggle("", isOn: $store.settings.desktopWidgetEnabled)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+            }
+
+            if store.settings.desktopWidgetEnabled {
+                SettingRow(
+                    title: "Widget text size",
+                    subtitle: "How big the titles are."
+                ) {
+                    Picker("", selection: $store.settings.desktopWidgetTitleSize) {
+                        Text("Large").tag(24.0)
+                        Text("Huge").tag(32.0)
+                        Text("Giant").tag(44.0)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 190)
+                }
+            }
+
+            SettingRow(
                 title: "Start Vestitel at login",
                 subtitle: launchAtLoginError ?? "Opens automatically when you log in to your Mac.",
                 onTap: { launchAtLogin.toggle() }
@@ -603,7 +629,7 @@ struct SettingsView: View {
             HStack(spacing: 6) {
                 Text("Vestitel")
                     .font(.system(size: 13, weight: .medium))
-                Text("Version \(Self.appVersion)")
+                Text(Self.appVersion)
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)

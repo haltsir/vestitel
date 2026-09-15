@@ -31,8 +31,13 @@ remembered in **Archive**; anything you want to keep is a **Bookmark**.
   Inbox through a drop folder or a `vestitel://add` URL, see below. Ozonko, a
   companion app that watches ozone.bg, posts its findings this way.
 - **Topic grouping**: articles about the same story from different sources are
-  clustered (keyword overlap plus Apple NaturalLanguage sentence embeddings).
-  Tune or turn off in Settings.
+  clustered under one coloured header (keyword overlap with a Bulgarian
+  stemmer, plus Apple NaturalLanguage sentence embeddings for English; digest
+  rubrics such as "Бизнес глобус:" and price words are ignored). Click the
+  header to collapse the group, swipe or × to clear it. Tune or turn off in
+  Settings.
+- **Group by source**: the Inbox header's grid button switches to one block
+  per feed instead of topic groups.
 - **Smart inboxes**: saved views of the Inbox, like Mail's smart mailboxes:
   keywords (any/all) and optional sources. They show as subtabs at the top of
   the Inbox with unread counts, in the order you choose; the ones that don't
@@ -44,18 +49,31 @@ remembered in **Archive**; anything you want to keep is a **Bookmark**.
 - **Sync between Macs**: point every Mac at the same cloud folder (Google
   Drive, iCloud Drive…). Feeds, read/cleared state, bookmarks and the
   never-show-again list merge with no conflicts: each Mac writes only its own
-  file. Preferences stay per Mac.
+  file. Preferences stay per Mac unless you turn on preference sync, after
+  which the newest change wins everywhere.
+- **Desktop widget**: a big copy of the Inbox that lives on the desktop
+  under your windows, in huge type, with new articles sliding in on top as
+  they arrive. Drag it by its background, resize it by its edges, pick the
+  text size. Settings → Behavior.
 - **Quiet while you read**: articles that arrive while the popover is open
   wait behind an "N new" button instead of shifting the list under you.
-- **Swipe to clear**, right-click menus, copy link, Open All, Clear Inbox.
+- **Swipe to clear**, hover × and Open in Browser on every row, right-click
+  menus, copy link, Open All, Clear Inbox.
+- **Skip old articles**: optionally ignore anything published more than N days
+  ago, so a slow feed's back catalogue never floods the Inbox. **Compact
+  rows** for a denser list.
 - **Automatic updates**: once a day Vestitel checks GitHub releases and, while
   the popover is closed, installs a newer version whose release zip carries a
   valid ed25519 signature. Toggle or trigger it under Settings → About.
 - **Import / Export settings** as JSON; **Start at login**.
 
-| Muted keywords and smart inboxes | Local sources and About |
+| Behavior | Muted keywords and smart inboxes |
 |---|---|
-| ![Settings, filters](docs/screenshots/settings-filters.png) | ![Settings, about](docs/screenshots/settings-about.png) |
+| ![Settings, behavior](docs/screenshots/settings-behavior.png) | ![Settings, filters](docs/screenshots/settings-filters.png) |
+
+| Local sources | About and updates |
+|---|---|
+| ![Settings, local sources](docs/screenshots/settings-local-sources.png) | ![Settings, about](docs/screenshots/settings-about.png) |
 
 ## Sending things to Vestitel from other apps
 

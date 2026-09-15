@@ -346,15 +346,18 @@ struct GroupBlock: View {
             .gesture(headerDragGesture)
 
             if !collapsed {
+                // The photo runs edge to edge straight under the band, inset
+                // by the block's 1 pt border so it touches the border rather
+                // than running under it.
+                if !isSourceGroup, !store.settings.compactRows,
+                   let hero = group.articles.first(where: { $0.imageURL != nil })?.imageURL {
+                    GroupBanner(url: hero, flush: true)
+                        .padding(.horizontal, 1)
+                }
                 // Same rhythm as the top-level list (6 pt side inset, 2 pt
                 // between rows), so a row's hover box keeps clear of the
                 // block's edges, the banner and its neighbours.
                 VStack(alignment: .leading, spacing: 2) {
-                    if !isSourceGroup, !store.settings.compactRows,
-                       let hero = group.articles.first(where: { $0.imageURL != nil })?.imageURL {
-                        GroupBanner(url: hero)
-                            .padding(.bottom, 4)
-                    }
                     ForEach(Array(group.articles.enumerated()), id: \.element.id) { index, article in
                         // a source block is a list, not one story: every row the
                         // same, dense (member style), none of them the lead

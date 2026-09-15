@@ -683,6 +683,9 @@ struct ArticleThumbnail: View {
 /// wide band would throw away half of a 16:9 news photo.
 struct GroupBanner: View {
     let url: URL
+    /// Edge to edge under the group's header band: square corners, no
+    /// hairline (the block's own border frames it).
+    var flush = false
     @State private var image: NSImage? = nil
 
     private static let minAspect: CGFloat = 2.4
@@ -709,10 +712,10 @@ struct GroupBanner: View {
                     Color.primary.opacity(0.05)
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .clipShape(RoundedRectangle(cornerRadius: flush ? 0 : 8))
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
-                    .strokeBorder(Color.primary.opacity(0.1), lineWidth: 1)
+                    .strokeBorder(Color.primary.opacity(flush ? 0 : 0.1), lineWidth: 1)
             )
             .allowsHitTesting(false)
             .task(id: url) { await load() }

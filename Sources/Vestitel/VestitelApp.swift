@@ -13,11 +13,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct VestitelApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var store = AppStore()
+    @StateObject private var store: AppStore
 
     init() {
         // Menu-bar-only app: no Dock icon even when run outside a bundle.
         NSApplication.shared.setActivationPolicy(.accessory)
+        let store = AppStore()
+        _store = StateObject(wrappedValue: store)
+        // The desktop widget is an AppKit window driven by the store's
+        // settings; it lives outside the SwiftUI scene tree.
+        DesktopWidgetController.shared.attach(store)
     }
 
     var body: some Scene {

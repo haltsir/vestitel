@@ -205,6 +205,15 @@ struct AppSettings: Codable, Equatable {
     /// sources are exempt.
     var skipOldArticles: Bool = false
     var maxArticleAgeDays: Int = 30
+    /// A big, always-visible copy of the Inbox on the desktop (a borderless
+    /// window under every other window): huge titles, new articles slide in
+    /// on top as they arrive. Per-Mac, like the frame it remembers.
+    var desktopWidgetEnabled: Bool = false
+    /// Title point size in the desktop widget; the meta line scales with it.
+    var desktopWidgetTitleSize: Double = 32
+    /// Last window frame (x, y, width, height in screen points), so the
+    /// widget comes back where it was left. Never synced: screens differ.
+    var desktopWidgetFrame: [Double]? = nil
     /// When true the menu bar icon may use colour (new-article signal,
     /// popover-open head, arrival animation); when false it is strictly
     /// monochrome in every state.
@@ -245,6 +254,9 @@ struct AppSettings: Codable, Equatable {
         maxArticlesPerFeed = try c.decodeIfPresent(Int.self, forKey: .maxArticlesPerFeed) ?? 50
         skipOldArticles = try c.decodeIfPresent(Bool.self, forKey: .skipOldArticles) ?? false
         maxArticleAgeDays = try c.decodeIfPresent(Int.self, forKey: .maxArticleAgeDays) ?? 30
+        desktopWidgetEnabled = try c.decodeIfPresent(Bool.self, forKey: .desktopWidgetEnabled) ?? false
+        desktopWidgetTitleSize = try c.decodeIfPresent(Double.self, forKey: .desktopWidgetTitleSize) ?? 32
+        desktopWidgetFrame = try c.decodeIfPresent([Double].self, forKey: .desktopWidgetFrame)
         allowColoredIcon = try c.decodeIfPresent(Bool.self, forKey: .allowColoredIcon) ?? true
         compactRows = try c.decodeIfPresent(Bool.self, forKey: .compactRows) ?? false
         groupBySource = try c.decodeIfPresent(Bool.self, forKey: .groupBySource) ?? false
