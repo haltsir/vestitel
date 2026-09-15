@@ -603,63 +603,108 @@ struct ArticleRow: View {
     }
 }
 
-/// Hover tracking that ignores a momentary exit. A `.help()` tooltip
-/// installs its tracking area the first time the pointer arrives, which
-/// AppKit reports as an exit followed by an enter within a frame; bound
-/// straight to a highlight that reads as a double hover, a quick flash of
-/// the button background. The exit is applied only if the pointer is still
-/// out 40 ms later.
-struct DebouncedHover: ViewModifier {
+/// Hover tracking for the row buttons: a debounced, verified `onHover` plus
+/// a pointer probe that re-checks the view whenever it moves.
+///
+/// Debounced: a `.help()` tooltip installs its tracking area the first
+/// time the pointer arrives, which AppKit reports as an exit followed by an
+/// enter within a frame; bound straight to a highlight that reads as a
+/// double hover, a quick flash of the button background. Verified: an exit
+/// is applied 40 ms later only if the probe says the pointer really is
+/// outside. A click on a row's × delivers an enter to the button while its
+/// row still says "not hovered" (so `enabled` is false), the next row then
+/// slides under the still pointer, the probe marks its × hovered, and a
+/// deferred exit scheduled from that early event would clear it again:
+/// the × showed but never got its box. An enter while disabled is ignored
+/// outright, and no exit is trusted over the pointer's actual position.
+///
+/// Probe: `onHover` only fires on pointer movement, so after clearing a
+/// row the next row slides under the cursor without ever learning it is
+/// hovered, and its × stays hidden until the mouse twitches. The probe
+/// re-checks the pointer against the view's frame whenever that frame or
+/// `enabled` changes (and when the view appears).
+struct HoverTracking: ViewModifier {
     @Binding var hovering: Bool
     var enabled = true
+    @State private var probe = PointerProbeHandle()
     @State private var pendingExit: DispatchWorkItem?
 
     func body(content: Content) -> some View {
-        content.onHover { inside in
-            pendingExit?.cancel()
-            if inside && enabled {
-                hovering = true
-            } else {
-                let work = DispatchWorkItem { hovering = false }
-                pendingExit = work
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.04, execute: work)
+        content
+            .background(GeometryReader { proxy in
+                PointerProbe(frame: proxy.frame(in: .global), enabled: enabled, handle: probe) { inside in
+                    if hovering != inside { hovering = inside }
+                }
+            })
+            .onHover { inside in
+                pendingExit?.cancel()
+                guard enabled else { return }
+                if inside {
+                    hovering = true
+                } else {
+                    let work = DispatchWorkItem {
+                        if probe.pointerInside() == true { return }
+                        hovering = false
+                    }
+                    pendingExit = work
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.04, execute: work)
+                }
             }
-        }
     }
 }
 
 extension View {
-    func debouncedHover(_ hovering: Binding<Bool>, enabled: Bool = true) -> some View {
-        modifier(DebouncedHover(hovering: hovering, enabled: enabled))
+    func hoverTracking(_ hovering: Binding<Bool>, enabled: Bool = true) -> some View {
+        modifier(HoverTracking(hovering: hovering, enabled: enabled))
     }
 
-    /// Keeps a hover state right when the view moves under a *stationary*
-    /// pointer: `onHover` only fires on pointer movement, so after clearing
-    /// a row the next row slides under the cursor without ever learning it
-    /// is hovered, and its × stays hidden until the mouse twitches. The
-    /// probe re-checks the pointer against the view's frame whenever that
-    /// frame changes (and when the view appears).
+    /// The probe half of `hoverTracking` alone, for rows and group blocks
+    /// that bind `onHover` directly: keeps a hover state right when the
+    /// view moves under a *stationary* pointer.
     func hoverRefresh(_ hovering: Binding<Bool>, enabled: Bool = true) -> some View {
         background(GeometryReader { proxy in
-            PointerProbe(frame: proxy.frame(in: .global)) { inside in
-                let value = inside && enabled
-                if hovering.wrappedValue != value { hovering.wrappedValue = value }
+            PointerProbe(frame: proxy.frame(in: .global), enabled: enabled, handle: nil) { inside in
+                if hovering.wrappedValue != inside { hovering.wrappedValue = inside }
             }
         })
     }
 }
 
-/// AppKit side of `hoverRefresh`: sized to the view it backs, it asks its
+/// Lets `HoverTracking` ask the probe's NSView where the pointer is.
+final class PointerProbeHandle {
+    weak var view: NSView?
+
+    /// nil when there is no visible window to ask.
+    func pointerInside() -> Bool? {
+        guard let view, let window = view.window, window.isVisible else { return nil }
+        let local = view.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        return view.bounds.contains(local)
+    }
+}
+
+/// AppKit side of the probe: sized to the view it backs, it asks its
 /// window where the pointer is and reports whether that is inside. `frame`
-/// is only there so SwiftUI calls `updateNSView` when the view moves.
+/// and `enabled` are stored (not just captured by `report`) so SwiftUI
+/// calls `updateNSView` when either changes: a row's × is gated on the
+/// row's hover, and after a clear the row's probe and the button's probe
+/// fire in the same pass, the button's while the row still says "not
+/// hovered"; the row flipping to hovered must re-run the button's check.
 struct PointerProbe: NSViewRepresentable {
     var frame: CGRect
+    var enabled: Bool
+    var handle: PointerProbeHandle?
     var report: (Bool) -> Void
 
-    func makeNSView(context: Context) -> NSView { NSView() }
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        handle?.view = view
+        return view
+    }
 
     func updateNSView(_ view: NSView, context: Context) {
+        let enabled = enabled
         DispatchQueue.main.async {
+            guard enabled else { report(false); return }
             guard let window = view.window, window.isVisible else { return }
             let local = view.convert(window.mouseLocationOutsideOfEventStream, from: nil)
             report(view.bounds.contains(local))
@@ -694,8 +739,7 @@ struct RowActionButton: View {
         .disabled(disabled || !visible)
         .opacity(visible ? 1 : 0)
         .allowsHitTesting(visible)
-        .debouncedHover($hovering, enabled: visible)
-        .hoverRefresh($hovering, enabled: visible)
+        .hoverTracking($hovering, enabled: visible)
 
         .help(help)
     }
@@ -816,8 +860,7 @@ struct InlineShareButton: View {
                     .rowActionLook(hovering: hovering, tint: .secondary, small: small, quiet: true)
             }
             .buttonStyle(.plain)
-            .debouncedHover($hovering)
-            .hoverRefresh($hovering)
+            .hoverTracking($hovering)
             .help("Share")
         }
     }
