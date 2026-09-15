@@ -239,6 +239,57 @@ final class AppStore: ObservableObject {
         }
     }
 
+    // MARK: Ad-hoc filter
+
+    /// The Inbox tab's on-the-fly filter (the magnifier in the header): a
+    /// smart inbox typed for the moment, never saved. Every whitespace-
+    /// separated term must occur in the title, summary, tag or source name.
+    /// In-memory only; survives popover close so a filter isn't lost when
+    /// opening a link takes the focus away.
+    @Published var inboxFilterText = ""
+    @Published var inboxFilterShown = false
+
+    var inboxFilterTerms: [String] {
+        inboxFilterText.lowercased().split(whereSeparator: \.isWhitespace).map(String.init)
+    }
+
+    var isInboxFiltering: Bool { !inboxFilterTerms.isEmpty }
+
+    func toggleInboxFilter() {
+        if inboxFilterShown { dismissInboxFilter() } else { inboxFilterShown = true }
+    }
+
+    func dismissInboxFilter() {
+        inboxFilterShown = false
+        inboxFilterText = ""
+    }
+
+    /// Everything that narrows the Inbox tab, resolved once per render:
+    /// the selected smart inbox AND the ad-hoc filter terms.
+    struct InboxScope {
+        let smartInbox: SmartInbox?
+        let terms: [String]
+        let feedURLByID: [UUID: URL]
+        let feedTitleByID: [UUID: String]
+        var isNarrowing: Bool { smartInbox != nil || !terms.isEmpty }
+    }
+
+    var inboxScope: InboxScope {
+        InboxScope(smartInbox: selectedSmartInbox, terms: inboxFilterTerms,
+                   feedURLByID: feedURLByID,
+                   feedTitleByID: Dictionary(feeds.map { ($0.id, $0.title.lowercased()) },
+                                             uniquingKeysWith: { a, _ in a }))
+    }
+
+    private func matches(_ article: Article, _ scope: InboxScope) -> Bool {
+        if let inbox = scope.smartInbox,
+           !matches(article, inbox, feedURLByID: scope.feedURLByID) { return false }
+        guard !scope.terms.isEmpty else { return true }
+        let text = Self.searchText(of: article)
+        let source = scope.feedTitleByID[article.feedID] ?? ""
+        return scope.terms.allSatisfy { text.contains($0) || source.contains($0) }
+    }
+
     /// `list` narrowed to a smart inbox; nil passes everything through.
     func articles(_ list: [Article], in inbox: SmartInbox?) -> [Article] {
         guard let inbox else { return list }
@@ -246,19 +297,23 @@ final class AppStore: ObservableObject {
         return list.filter { matches($0, inbox, feedURLByID: urls) }
     }
 
-    /// What the Inbox tab currently shows (All, or the selected smart inbox).
+    /// What the Inbox tab currently shows (All or the selected smart inbox,
+    /// narrowed further by the ad-hoc filter).
     var visibleInbox: [Article] {
-        articles(inbox, in: selectedSmartInbox)
+        let scope = inboxScope
+        guard scope.isNarrowing else { return inbox }
+        return inbox.filter { matches($0, scope) }
     }
 
-    /// Topic groups narrowed to the selected smart inbox: groups are built
-    /// once over the whole inbox (that's the expensive part) and members
-    /// that don't match are dropped, so a story stays grouped inside a view.
+    /// Topic groups narrowed to the selected smart inbox and filter: groups
+    /// are built once over the whole inbox (that's the expensive part) and
+    /// members that don't match are dropped, so a story stays grouped
+    /// inside a view.
     var visibleGroupedInbox: [TopicGroup] {
-        guard let inbox = selectedSmartInbox else { return groupedInbox }
-        let urls = feedURLByID
+        let scope = inboxScope
+        guard scope.isNarrowing else { return groupedInbox }
         return groupedInbox.compactMap { group in
-            let members = group.articles.filter { matches($0, inbox, feedURLByID: urls) }
+            let members = group.articles.filter { matches($0, scope) }
             guard !members.isEmpty else { return nil }
             return TopicGroup(id: group.id, headline: group.headline, articles: members,
                               sourceFeedID: group.sourceFeedID)
@@ -285,7 +340,8 @@ final class AppStore: ObservableObject {
     }
 
     /// "Clear Inbox" scoped to what's on screen: with a smart inbox selected
-    /// only its articles go (held ones are already excluded by `inbox`).
+    /// or a filter typed only the shown articles go (held ones are already
+    /// excluded by `inbox`).
     func clearVisibleInbox() {
         let ids = Set(visibleInbox.map(\.id))
         let now = Date()

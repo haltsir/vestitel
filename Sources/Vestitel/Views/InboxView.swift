@@ -13,7 +13,14 @@ struct InboxView: View {
                 Divider()
             }
             if groups.isEmpty {
-                if let selected {
+                if store.isInboxFiltering {
+                    EmptyStateView(
+                        icon: "magnifyingglass",
+                        title: "No matches",
+                        subtitle: selected.map { "Nothing in \($0.name) matches “\(store.inboxFilterText.trimmingCharacters(in: .whitespaces))”." }
+                            ?? "No inbox article matches “\(store.inboxFilterText.trimmingCharacters(in: .whitespaces))”."
+                    )
+                } else if let selected {
                     EmptyStateView(
                         icon: "line.3.horizontal.decrease.circle",
                         title: "Nothing in \(selected.name)",
@@ -63,7 +70,7 @@ struct InboxView: View {
             }
             Spacer()
             let visible = store.visibleInbox
-            let scoped = store.selectedSmartInbox != nil
+            let scoped = store.selectedSmartInbox != nil || store.isInboxFiltering
             OpenAllButton(count: visible.count) {
                 store.openAll(visible)
             }
@@ -75,12 +82,86 @@ struct InboxView: View {
             .buttonStyle(HoverButtonStyle())
             .disabled(visible.isEmpty)
             .help(scoped
-                  ? "Move the articles in this smart inbox to Cleared (recoverable for 24 hours)"
+                  ? "Move the articles shown to Cleared (recoverable for 24 hours)"
                   : "Move all inbox articles to Cleared (recoverable for 24 hours)")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
     }
+}
+
+/// The ad-hoc filter: a smart inbox typed for the moment, shown in the
+/// header row in place of the tab title. Takes focus when it appears; Esc
+/// (or the header magnifier) dismisses it and drops the text, the × only
+/// drops the text.
+struct InboxFilterField: View {
+    @EnvironmentObject var store: AppStore
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+            TextField("Filter by title, summary or source", text: $store.inboxFilterText)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12.5))
+                .focused($focused)
+                .onExitCommand { withAnimation(.filterReveal) { store.dismissInboxFilter() } }
+            if !store.inboxFilterText.isEmpty {
+                Button {
+                    store.inboxFilterText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear the filter text")
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
+        .frame(maxWidth: .infinity)
+        .background(KeyWindowProbe {
+            // A mouse click in the popover doesn't make its window key (the
+            // app stays inactive behind the menu bar extra), and a focus
+            // request into a non-key window is dropped, so ⌘F focused the
+            // field and a click on the magnifier didn't. Set synchronously
+            // in onAppear it was dropped as well: the field wasn't in the
+            // responder chain yet.
+            focused = true
+        })
+    }
+}
+
+/// Makes the hosting window key (activating the app if needed) once the
+/// view is in it, then runs `then` on the next turn of the run loop.
+private struct KeyWindowProbe: NSViewRepresentable {
+    let then: () -> Void
+
+    final class Probe: NSView {
+        var then: (() -> Void)?
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window, let then else { return }
+            self.then = nil
+            DispatchQueue.main.async {
+                if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
+                if !window.isKeyWindow { window.makeKey() }
+                then()
+            }
+        }
+    }
+
+    func makeNSView(context: Context) -> Probe {
+        let view = Probe()
+        view.then = then
+        return view
+    }
+
+    func updateNSView(_ nsView: Probe, context: Context) {}
 }
 
 /// Subtabs for the smart inboxes: "All" first, then as many as fit in

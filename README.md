@@ -42,6 +42,11 @@ remembered in **Archive**; anything you want to keep is a **Bookmark**.
   keywords (any/all) and optional sources. They show as subtabs at the top of
   the Inbox with unread counts, in the order you choose; the ones that don't
   fit go into a More menu.
+- **Filter**: the magnifier in the Inbox header (or ⌘F) opens a filter field in
+  the header for a smart inbox you don't want to save: type words and the Inbox narrows
+  to articles whose title, summary, tag or source name contains all of them,
+  inside the selected smart inbox. Open All and Clear Shown act on what is
+  shown; Esc dismisses it.
 - **Muted keywords**: articles whose title, summary or tag contains a muted word
   skip the Inbox and go straight to Cleared, tagged with the keyword. The
   Cleared tab's "Filtered" toggle shows what they caught, with Restore if a

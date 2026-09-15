@@ -56,19 +56,30 @@ struct ContentView: View {
     private var header: some View {
         VStack(spacing: 10) {
             HStack(spacing: 10) {
-                Image(systemName: tab.icon)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
-                Text(tab.rawValue)
-                    .font(.title3.weight(.semibold))
+                if tab == .inbox, store.inboxFilterShown {
+                    // The filter takes the title's place: an inbox typed
+                    // for the moment is what the tab is showing. It unfolds
+                    // leftwards from the magnifier, like a toolbar search.
+                    InboxFilterField()
+                        .transition(.revealFromTrailing)
+                } else {
+                    Image(systemName: tab.icon)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .transition(.opacity)
+                    Text(tab.rawValue)
+                        .font(.title3.weight(.semibold))
+                        .transition(.opacity)
+                }
 
-                if tab == .inbox, store.unreadCount > 0 {
+                if tab == .inbox, store.unreadCount > 0, !store.inboxFilterShown {
                     Text("\(store.unreadCount) unread")
                         .font(.system(size: 11, weight: .semibold))
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
                         .background(Color.accentColor.opacity(0.15), in: Capsule())
                         .foregroundStyle(Color.accentColor)
+                        .transition(.opacity)
                 }
                 // Articles fetched while reading wait behind this button so
                 // the list never shifts underneath the user (see inboxHoldStart).
@@ -88,9 +99,16 @@ struct ContentView: View {
                     .help("Show the articles that arrived while you were reading")
                 }
 
-                Spacer()
+                if !(tab == .inbox && store.inboxFilterShown) { Spacer() }
 
                 if tab == .inbox {
+                    HeaderButton(
+                        icon: store.inboxFilterShown ? "magnifyingglass.circle.fill" : "magnifyingglass",
+                        help: store.inboxFilterShown ? "Hide the filter" : "Filter by title, summary or source",
+                        shortcut: KeyboardShortcut("f", modifiers: .command)
+                    ) {
+                        withAnimation(.filterReveal) { store.toggleInboxFilter() }
+                    }
                     HeaderButton(
                         icon: store.settings.groupBySource ? "rectangle.3.group.fill" : "rectangle.3.group",
                         help: store.settings.groupBySource ? "Show topic groups" : "Group by source"
@@ -134,9 +152,44 @@ struct ContentView: View {
     }
 }
 
+extension Animation {
+    /// The header filter's open/close: a settled spring, no bounce.
+    static let filterReveal = Animation.spring(duration: 0.28, bounce: 0)
+}
+
+/// Reveals the view from its trailing edge: a mask whose width grows from
+/// zero, so the field's pill extends leftwards instead of stretching or
+/// sliding in over the header.
+private struct RevealFromTrailing: ViewModifier, Animatable {
+    var fraction: CGFloat
+    var animatableData: CGFloat {
+        get { fraction }
+        set { fraction = newValue }
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .mask(alignment: .trailing) {
+                GeometryReader { geo in
+                    Rectangle()
+                        .frame(width: geo.size.width * fraction)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+            }
+            .opacity(Double(min(1, fraction * 2)))
+    }
+}
+
+extension AnyTransition {
+    static let revealFromTrailing = AnyTransition.modifier(
+        active: RevealFromTrailing(fraction: 0),
+        identity: RevealFromTrailing(fraction: 1))
+}
+
 struct HeaderButton: View {
     let icon: String
     let help: String
+    var shortcut: KeyboardShortcut? = nil
     let action: () -> Void
     @State private var hovering = false
 
@@ -149,6 +202,7 @@ struct HeaderButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .keyboardShortcut(shortcut)
         .onHover { hovering = $0 }
         .help(help)
     }
