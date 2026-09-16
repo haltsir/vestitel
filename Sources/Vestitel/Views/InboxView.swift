@@ -369,11 +369,12 @@ struct GroupBlock: View {
             HStack(spacing: 7) {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(tint)
                     .rotationEffect(.degrees(collapsed ? -90 : 0))
                 if isSourceGroup, let first = group.articles.first {
                     SourceMark(
                         host: store.sourceHost(feedID: first.feedID, title: first.sourceTitle),
-                        color: .white
+                        color: tint
                     )
                 }
                 Text(group.headline ?? "Related stories")
@@ -383,41 +384,33 @@ struct GroupBlock: View {
                     .font(.system(size: 10.5, weight: .bold))
                     .padding(.horizontal, 6.5)
                     .padding(.vertical, 1.5)
-                    .background(Color.white.opacity(0.25), in: Capsule())
+                    .foregroundStyle(.white)
+                    .background(tint, in: Capsule())
 
                 Spacer(minLength: 4)
 
                 // the group's own time, so a collapsed group still says when
                 Text(group.newest.articleDisplay)
                     .font(.system(size: 11.5))
-                    .foregroundStyle(Color.white.opacity(0.75))
+                    .foregroundStyle(.secondary)
 
                 // on hover, like the × on every row; the frame stays reserved
                 RowActionButton(
                     icon: "xmark",
-                    tint: .white,
                     help: "Clear all \(group.articles.count) articles in this group",
                     visible: hovering
                 ) {
                     store.clearGroup(group)
                 }
             }
-            // A solid band in the group's colour with white text: the
-            // popover material is translucent, and a tinted label over a
-            // backdrop of the same hue (a blue window behind) vanished,
-            // while a plain label read as one more article title. The band
-            // is opaque enough to ignore the backdrop and unlike any row.
-            .foregroundStyle(.white)
+            // The header sits on the block's own material, no band of its
+            // own, so the group is one card in one colour. The group colour
+            // is carried by the chevron, the count capsule, the source mark
+            // and the border; the bold label and the count keep it from
+            // reading as one more article title.
             .padding(.leading, 14)
             .padding(.trailing, 8)
-            .padding(.vertical, 6)
-            .background(
-                tint.opacity(0.92),
-                in: UnevenRoundedRectangle(
-                    topLeadingRadius: 10, bottomLeadingRadius: collapsed ? 10 : 0,
-                    bottomTrailingRadius: collapsed ? 10 : 0, topTrailingRadius: 10
-                )
-            )
+            .padding(.vertical, 7)
             .contentShape(Rectangle())
             // The whole band toggles collapse; the × is a Button and keeps
             // its own clicks. The swipe gesture needs 6 pt of movement, so
@@ -450,7 +443,16 @@ struct GroupBlock: View {
                 .padding(6)
             }
         }
-        .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 10))
+        // The body is a thick material with a whisper of the group colour:
+        // a bare tint over the popover turned into a saturated block over a
+        // same-hue window behind it, an opaque window colour was a black
+        // slab in a grey popover, and a neutral lift read as washed out.
+        // The material darkens and blurs the backdrop into a card instead.
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(.thickMaterial)
+                .overlay(RoundedRectangle(cornerRadius: 10).fill(tint.opacity(0.08)))
+        )
         .overlay(
             RoundedRectangle(cornerRadius: 10)
                 .strokeBorder(tint.opacity(0.35), lineWidth: 1)
