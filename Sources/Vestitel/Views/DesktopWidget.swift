@@ -22,6 +22,10 @@ final class DesktopWidgetController {
     /// Set while applying a stored frame, so the move notification it
     /// triggers doesn't write the same frame back.
     private var applyingFrame = false
+    /// When the screen set last changed (a display slept, woke, or was
+    /// unplugged). Moves right after that are the window server's, not the
+    /// user's, and must not overwrite the remembered frame.
+    private var screensChangedAt: Date = .distantPast
 
     private static let defaultSize = NSSize(width: 560, height: 760)
 
@@ -84,29 +88,78 @@ final class DesktopWidgetController {
         effect.addSubview(hosting)
         panel.contentView = effect
 
-        for name in [NSWindow.didMoveNotification, NSWindow.didEndLiveResizeNotification] {
-            observers.append(NotificationCenter.default.addObserver(
-                forName: name, object: panel, queue: .main
-            ) { [weak self] _ in
-                Task { @MainActor in self?.rememberFrame() }
-            })
-        }
+        // Synchronous handlers: setFrame posts didMove before it returns,
+        // so `applyingFrame` only covers the notification if it is handled
+        // right there, not in a Task that runs after the flag is cleared.
+        observers.append(NotificationCenter.default.addObserver(
+            forName: NSWindow.didMoveNotification, object: panel, queue: nil
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.rememberFrame(userMoveOnly: true) }
+        })
+        observers.append(NotificationCenter.default.addObserver(
+            forName: NSWindow.didEndLiveResizeNotification, object: panel, queue: nil
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.rememberFrame(userMoveOnly: false) }
+        })
+        // A display going to sleep detaches its screen and the window
+        // server relocates the panel onto one that is left; when it wakes
+        // nothing moves the panel back. The remembered frame is where the
+        // user wants it, so it is re-applied whenever it is on an attached
+        // screen again.
+        observers.append(NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: nil
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.screensChanged() }
+        })
         return panel
     }
 
-    private func rememberFrame() {
+    /// Store the panel's frame as the user's preferred one. A move is
+    /// remembered only when the user made it (the grabber's performDrag,
+    /// so a mouse drag or its release is the current event) and not in
+    /// the seconds after a screen change, when the window server is the
+    /// one moving windows off a vanished display.
+    private func rememberFrame(userMoveOnly: Bool) {
         guard !applyingFrame, let panel, let store else { return }
+        if userMoveOnly {
+            guard Date().timeIntervalSince(screensChangedAt) > 3 else { return }
+            let type = NSApp.currentEvent?.type
+            guard type == .leftMouseDragged || type == .leftMouseUp || type == .leftMouseDown else { return }
+        }
         let f = panel.frame
+        // never remember a frame that is on no screen
+        guard NSScreen.screens.contains(where: { $0.frame.intersects(f) }) else { return }
         let stored: [Double] = [f.origin.x, f.origin.y, f.size.width, f.size.height].map(Double.init)
         if store.settings.desktopWidgetFrame != stored {
             store.settings.desktopWidgetFrame = stored
         }
     }
 
+    private func screensChanged() {
+        screensChangedAt = Date()
+        guard let panel, store?.settings.desktopWidgetEnabled == true else { return }
+        if let preferred = storedFrame() {
+            // the preferred frame's display is attached (again): go there
+            if panel.frame != preferred { apply(preferred) }
+        } else if !NSScreen.screens.contains(where: { $0.frame.intersects(panel.frame) }) {
+            // its display is gone and the panel is stranded: a temporary
+            // home on the main screen, the preferred frame stays remembered
+            apply(defaultFrame())
+        }
+    }
+
+    private func apply(_ frame: NSRect) {
+        applyingFrame = true
+        panel?.setFrame(frame, display: true)
+        applyingFrame = false
+    }
+
+    /// The remembered frame, or nil when it is on no attached screen (the
+    /// caller then uses the default; the setting itself is left alone so
+    /// the frame comes back with its display).
     private func storedFrame() -> NSRect? {
         guard let v = store?.settings.desktopWidgetFrame, v.count == 4 else { return nil }
         let rect = NSRect(x: v[0], y: v[1], width: max(v[2], 320), height: max(v[3], 240))
-        // a frame from a screen that is no longer attached falls back to the default
         guard NSScreen.screens.contains(where: { $0.frame.intersects(rect) }) else { return nil }
         return rect
     }
