@@ -216,9 +216,16 @@ struct AppSettings: Codable, Equatable {
     var desktopWidgetEnabled: Bool = false
     /// Title point size in the desktop widget; the meta line scales with it.
     var desktopWidgetTitleSize: Double = 32
-    /// Last window frame (x, y, width, height in screen points), so the
-    /// widget comes back where it was left. Never synced: screens differ.
+    /// Last window frame (x, y, width, height in points), so the widget
+    /// comes back where it was left. With `desktopWidgetScreen` set, x and
+    /// y are relative to that screen's origin; without it (frames saved
+    /// before 1.24) they are global. Never synced: screens differ.
     var desktopWidgetFrame: [Double]? = nil
+    /// The screen `desktopWidgetFrame` is relative to (`NSScreen.stableKey`).
+    /// Global coordinates are re-based whenever a display sleeps, wakes or
+    /// unplugs (a side display alone sits at 0,0), so a global frame can
+    /// name the wrong display after a wake; a screen plus an offset can't.
+    var desktopWidgetScreen: String? = nil
     /// When true the menu bar icon may use colour (new-article signal,
     /// popover-open head, arrival animation); when false it is strictly
     /// monochrome in every state.
@@ -262,6 +269,7 @@ struct AppSettings: Codable, Equatable {
         desktopWidgetEnabled = try c.decodeIfPresent(Bool.self, forKey: .desktopWidgetEnabled) ?? false
         desktopWidgetTitleSize = try c.decodeIfPresent(Double.self, forKey: .desktopWidgetTitleSize) ?? 32
         desktopWidgetFrame = try c.decodeIfPresent([Double].self, forKey: .desktopWidgetFrame)
+        desktopWidgetScreen = try c.decodeIfPresent(String.self, forKey: .desktopWidgetScreen)
         allowColoredIcon = try c.decodeIfPresent(Bool.self, forKey: .allowColoredIcon) ?? true
         compactRows = try c.decodeIfPresent(Bool.self, forKey: .compactRows) ?? false
         groupBySource = try c.decodeIfPresent(Bool.self, forKey: .groupBySource) ?? false

@@ -45,6 +45,7 @@ extension AppStore {
         shared.desktopWidgetEnabled = false
         shared.desktopWidgetTitleSize = 32
         shared.desktopWidgetFrame = nil
+        shared.desktopWidgetScreen = nil
         return shared
     }
 

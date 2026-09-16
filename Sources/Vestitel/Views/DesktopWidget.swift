@@ -47,10 +47,31 @@ final class DesktopWidgetController {
     private func setVisible(_ visible: Bool) {
         if visible {
             if panel == nil { panel = makePanel() }
-            panel?.orderFrontRegardless()
+            showIfScreenAttached()
         } else {
             panel?.orderOut(nil)
         }
+    }
+
+    /// Shows the panel on its remembered screen, or keeps it hidden while
+    /// that screen is not attached: a widget that lives on a side display
+    /// should disappear with it, not squat on the main one. Without a
+    /// remembered frame it shows at the default place.
+    private func showIfScreenAttached() {
+        guard let panel else { return }
+        if let preferred = storedFrame() {
+            if panel.frame != preferred { apply(preferred) }
+            panel.orderFrontRegardless()
+        } else if hasStoredFrame {
+            panel.orderOut(nil)
+        } else {
+            if !NSScreen.screens.contains(where: { $0.frame.intersects(panel.frame) }) { apply(defaultFrame()) }
+            panel.orderFrontRegardless()
+        }
+    }
+
+    private var hasStoredFrame: Bool {
+        (store?.settings.desktopWidgetFrame?.count ?? 0) == 4
     }
 
     private func makePanel() -> NSPanel {
@@ -102,17 +123,24 @@ final class DesktopWidgetController {
                 self.rememberFrame()
             }
         })
-        // A live resize is by definition the user's (the edges).
+        // AppKit posts didEndLiveResize while it reconciles windows to a
+        // changed screen set too, with no resize at all (seen on wake, as
+        // the sole remaining display was re-based to 0,0), so a resize is
+        // remembered only when the size actually changed.
         observers.append(NotificationCenter.default.addObserver(
             forName: NSWindow.didEndLiveResizeNotification, object: panel, queue: nil
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.rememberFrame() }
+            MainActor.assumeIsolated {
+                guard let self, let panel = self.panel, let v = self.store?.settings.desktopWidgetFrame, v.count == 4,
+                      panel.frame.width != v[2] || panel.frame.height != v[3] else { return }
+                self.rememberFrame()
+            }
         })
         // A display going to sleep detaches its screen and the window
         // server relocates the panel onto one that is left; when it wakes
         // nothing moves the panel back. The remembered frame is where the
-        // user wants it, so it is re-applied whenever it is on an attached
-        // screen again. Screens come back in several steps over some
+        // user wants it, so it is re-applied whenever its screen is
+        // attached again. Screens come back in several steps over some
         // seconds (and the window server may move windows after the
         // notification), hence the retries.
         observers.append(NotificationCenter.default.addObserver(
@@ -152,16 +180,23 @@ final class DesktopWidgetController {
         dragEndMonitors.removeAll()
     }
 
-    /// Store the panel's frame as the user's preferred one. Only reached
-    /// from a grabber drag or a live resize, never from a system move.
+    /// Store the panel's frame as the user's preferred one: the screen it
+    /// is (mostly) on and the offset from that screen's origin. Only
+    /// reached from a grabber drag or a real resize, never a system move.
     private func rememberFrame() {
         guard !applyingFrame, let panel, let store else { return }
         let f = panel.frame
-        // never remember a frame that is on no screen
-        guard NSScreen.screens.contains(where: { $0.frame.intersects(f) }) else { return }
-        let stored: [Double] = [f.origin.x, f.origin.y, f.size.width, f.size.height].map(Double.init)
-        if store.settings.desktopWidgetFrame != stored {
-            store.settings.desktopWidgetFrame = stored
+        guard let screen = NSScreen.screens
+            .max(by: { $0.frame.intersection(f).area < $1.frame.intersection(f).area }),
+              screen.frame.intersects(f) else { return }   // never remember a frame on no screen
+        let rel: [Double] = [f.origin.x - screen.frame.origin.x, f.origin.y - screen.frame.origin.y,
+                             f.width, f.height].map(Double.init)
+        let key = screen.stableKey
+        if store.settings.desktopWidgetFrame != rel || store.settings.desktopWidgetScreen != key {
+            var settings = store.settings
+            settings.desktopWidgetFrame = rel
+            settings.desktopWidgetScreen = key
+            store.settings = settings
         }
     }
 
@@ -178,15 +213,10 @@ final class DesktopWidgetController {
     }
 
     private func reapplyPreferredFrame() {
-        guard let panel, store?.settings.desktopWidgetEnabled == true else { return }
-        if let preferred = storedFrame() {
-            // the preferred frame's display is attached (again): go there
-            if panel.frame != preferred { apply(preferred) }
-        } else if !NSScreen.screens.contains(where: { $0.frame.intersects(panel.frame) }) {
-            // its display is gone and the panel is stranded: a temporary
-            // home on the main screen, the preferred frame stays remembered
-            apply(defaultFrame())
-        }
+        guard panel != nil, store?.settings.desktopWidgetEnabled == true else { return }
+        // the preferred frame's display is attached (again): go there and
+        // show; gone: hide, the preferred frame stays remembered
+        showIfScreenAttached()
     }
 
     private func apply(_ frame: NSRect) {
@@ -195,12 +225,19 @@ final class DesktopWidgetController {
         applyingFrame = false
     }
 
-    /// The remembered frame, or nil when it is on no attached screen (the
-    /// caller then uses the default; the setting itself is left alone so
-    /// the frame comes back with its display).
+    /// The remembered frame resolved against the attached screens, or nil
+    /// when its screen is not attached (the caller then uses the default;
+    /// the setting itself is left alone so the frame comes back with its
+    /// display). A frame saved before 1.24 has no screen and is global.
     private func storedFrame() -> NSRect? {
         guard let v = store?.settings.desktopWidgetFrame, v.count == 4 else { return nil }
-        let rect = NSRect(x: v[0], y: v[1], width: max(v[2], 320), height: max(v[3], 240))
+        let size = NSSize(width: max(v[2], 320), height: max(v[3], 240))
+        if let key = store?.settings.desktopWidgetScreen {
+            guard let screen = NSScreen.screens.first(where: { $0.stableKey == key }) else { return nil }
+            return NSRect(x: screen.frame.origin.x + v[0], y: screen.frame.origin.y + v[1],
+                          width: size.width, height: size.height)
+        }
+        let rect = NSRect(x: v[0], y: v[1], width: size.width, height: size.height)
         guard NSScreen.screens.contains(where: { $0.frame.intersects(rect) }) else { return nil }
         return rect
     }
@@ -318,6 +355,22 @@ struct DesktopWidgetView: View {
     }
 }
 
+extension NSScreen {
+    /// Identifies a display across sleep, wake and reconnection: vendor,
+    /// model and serial from Core Graphics (the display ID itself can change
+    /// between connections), with the name and size as a fallback.
+    var stableKey: String {
+        let id = (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+        let vendor = CGDisplayVendorNumber(id), model = CGDisplayModelNumber(id), serial = CGDisplaySerialNumber(id)
+        if vendor != 0 || model != 0 { return "\(vendor)-\(model)-\(serial)" }
+        return "\(localizedName)-\(Int(frame.width))x\(Int(frame.height))"
+    }
+}
+
+private extension NSRect {
+    var area: CGFloat { isNull || isEmpty ? 0 : width * height }
+}
+
 /// A strip that moves the window when pressed and dragged (the panel is
 /// not movable by its background, since dragging the list pans it).
 private struct WindowDragHandle: NSViewRepresentable {
@@ -378,6 +431,8 @@ struct DesktopWidgetRow: View {
     var fresh = false
     @State private var hovering = false
 
+    static let freshColor = Color(red: 0.25, green: 0.78, blue: 0.42)
+
     /// The source and time line, a bit over half the title: readable from
     /// across the room like the title is.
     private var metaSize: Double { max(13, titleSize * 0.55) }
@@ -422,11 +477,13 @@ struct DesktopWidgetRow: View {
         .background(hovering ? Color.primary.opacity(0.06) : .clear, in: RoundedRectangle(cornerRadius: 12))
         .background {
             // the arrival mark, under the hover fill; it lifts with a fade
+            // green, the colour that reads as "fresh": the accent blue
+            // sank into the frosted card over a busy wallpaper
             RoundedRectangle(cornerRadius: 12)
-                .fill(Color.accentColor.opacity(0.22))
+                .fill(Self.freshColor.opacity(0.3))
                 .overlay(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 2)
-                        .fill(Color.accentColor)
+                        .fill(Self.freshColor)
                         .frame(width: 5)
                         .padding(.vertical, 8)
                         .padding(.leading, 6)
