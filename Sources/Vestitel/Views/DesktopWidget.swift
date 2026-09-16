@@ -22,10 +22,13 @@ final class DesktopWidgetController {
     /// Set while applying a stored frame, so the move notification it
     /// triggers doesn't write the same frame back.
     private var applyingFrame = false
-    /// When the screen set last changed (a display slept, woke, or was
-    /// unplugged). Moves right after that are the window server's, not the
-    /// user's, and must not overwrite the remembered frame.
-    private var screensChangedAt: Date = .distantPast
+    /// Set from the grabber's mouse-down until the mouse-up: the only time
+    /// a move of the panel is the user's. Every other move (a display going
+    /// to sleep or unplugging makes the window server relocate the panel
+    /// onto a remaining screen) must not touch the remembered frame.
+    private var userDragging = false
+    private var dragEndMonitors: [Any] = []
+    private var reapplyWork: [DispatchWorkItem] = []
 
     private static let defaultSize = NSSize(width: 560, height: 760)
 
@@ -94,18 +97,24 @@ final class DesktopWidgetController {
         observers.append(NotificationCenter.default.addObserver(
             forName: NSWindow.didMoveNotification, object: panel, queue: nil
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.rememberFrame(userMoveOnly: true) }
+            MainActor.assumeIsolated {
+                guard let self, self.userDragging else { return }
+                self.rememberFrame()
+            }
         })
+        // A live resize is by definition the user's (the edges).
         observers.append(NotificationCenter.default.addObserver(
             forName: NSWindow.didEndLiveResizeNotification, object: panel, queue: nil
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.rememberFrame(userMoveOnly: false) }
+            MainActor.assumeIsolated { self?.rememberFrame() }
         })
         // A display going to sleep detaches its screen and the window
         // server relocates the panel onto one that is left; when it wakes
         // nothing moves the panel back. The remembered frame is where the
         // user wants it, so it is re-applied whenever it is on an attached
-        // screen again.
+        // screen again. Screens come back in several steps over some
+        // seconds (and the window server may move windows after the
+        // notification), hence the retries.
         observers.append(NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: nil
         ) { [weak self] _ in
@@ -114,18 +123,39 @@ final class DesktopWidgetController {
         return panel
     }
 
-    /// Store the panel's frame as the user's preferred one. A move is
-    /// remembered only when the user made it (the grabber's performDrag,
-    /// so a mouse drag or its release is the current event) and not in
-    /// the seconds after a screen change, when the window server is the
-    /// one moving windows off a vanished display.
-    private func rememberFrame(userMoveOnly: Bool) {
-        guard !applyingFrame, let panel, let store else { return }
-        if userMoveOnly {
-            guard Date().timeIntervalSince(screensChangedAt) > 3 else { return }
-            let type = NSApp.currentEvent?.type
-            guard type == .leftMouseDragged || type == .leftMouseUp || type == .leftMouseDown else { return }
+    /// Called by the grabber on mouse-down, before `performDrag`: moves
+    /// until the button is released are the user's and are remembered.
+    func beginUserDrag() {
+        endUserDrag()
+        userDragging = true
+        // performDrag hands the drag to the window server; the release is
+        // observed rather than delivered, locally and (the app is inactive
+        // behind its non-activating panel) globally, whichever comes first.
+        if let m = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp, handler: { [weak self] event in
+            Task { @MainActor in self?.endUserDrag() }
+            return event
+        }) { dragEndMonitors.append(m) }
+        if let m = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp, handler: { [weak self] _ in
+            Task { @MainActor in self?.endUserDrag() }
+        }) { dragEndMonitors.append(m) }
+    }
+
+    private func endUserDrag() {
+        if userDragging {
+            rememberFrame()
+            // the release is seen before the window server's last move of
+            // the drag lands; pick up the final frame a moment later
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.rememberFrame() }
         }
+        userDragging = false
+        for m in dragEndMonitors { NSEvent.removeMonitor(m) }
+        dragEndMonitors.removeAll()
+    }
+
+    /// Store the panel's frame as the user's preferred one. Only reached
+    /// from a grabber drag or a live resize, never from a system move.
+    private func rememberFrame() {
+        guard !applyingFrame, let panel, let store else { return }
         let f = panel.frame
         // never remember a frame that is on no screen
         guard NSScreen.screens.contains(where: { $0.frame.intersects(f) }) else { return }
@@ -136,7 +166,18 @@ final class DesktopWidgetController {
     }
 
     private func screensChanged() {
-        screensChangedAt = Date()
+        endUserDrag()   // a screen change is not a drag, whatever the monitors saw
+        userDragging = false
+        for w in reapplyWork { w.cancel() }
+        reapplyWork.removeAll()
+        for delay in [0.0, 1.0, 3.0, 8.0] {
+            let work = DispatchWorkItem { [weak self] in self?.reapplyPreferredFrame() }
+            reapplyWork.append(work)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        }
+    }
+
+    private func reapplyPreferredFrame() {
         guard let panel, store?.settings.desktopWidgetEnabled == true else { return }
         if let preferred = storedFrame() {
             // the preferred frame's display is attached (again): go there
@@ -258,6 +299,7 @@ struct DesktopWidgetView: View {
 private struct WindowDragHandle: NSViewRepresentable {
     final class HandleView: NSView {
         override func mouseDown(with event: NSEvent) {
+            DesktopWidgetController.shared.beginUserDrag()
             window?.performDrag(with: event)
         }
         override var mouseDownCanMoveWindow: Bool { false }
