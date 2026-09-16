@@ -59,7 +59,7 @@ remembered in **Archive**; anything you want to keep is a **Bookmark**.
   which the newest change wins everywhere.
 - **Desktop widget**: a big copy of the Inbox that lives on the desktop
   under your windows, in huge type, with new articles sliding in on top as
-  they arrive. No scrollbar, but it scrolls with the wheel or trackpad and pans when
+  they arrive, highlighted for five seconds so a glance shows what's new. No scrollbar, but it scrolls with the wheel or trackpad and pans when
   you press and drag the list. Move it by the grabber at the top, resize it
   by its edges, set the text size in points. Settings → Behavior.
 - **Quiet while you read**: articles that arrive while the popover is open

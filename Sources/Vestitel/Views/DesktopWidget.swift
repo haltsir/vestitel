@@ -223,11 +223,18 @@ struct DesktopWidgetView: View {
     @State private var offset: CGFloat = 0
     @State private var dragStart: CGFloat? = nil
     @State private var contentHeight: CGFloat = 0
+    /// Ids the widget has shown so far (nil until the first appearance), and
+    /// the ones that arrived since, still wearing the arrival mark.
+    @State private var knownIDs: Set<String>? = nil
+    @State private var freshIDs: Set<String> = []
 
     private static let maxRows = 60
+    /// How long an arrival stays marked before the mark fades.
+    static let freshDuration: TimeInterval = 5
 
     var body: some View {
         let articles = Array(store.inbox.prefix(Self.maxRows))
+        let ids = articles.map(\.id)
         let titleSize = store.settings.desktopWidgetTitleSize
         VStack(spacing: 0) {
             WindowDragHandle()
@@ -255,7 +262,8 @@ struct DesktopWidgetView: View {
                     } else {
                         VStack(alignment: .leading, spacing: 0) {
                             ForEach(articles) { article in
-                                DesktopWidgetRow(article: article, titleSize: titleSize)
+                                DesktopWidgetRow(article: article, titleSize: titleSize,
+                                                 fresh: freshIDs.contains(article.id))
                                     .transition(.asymmetric(
                                         insertion: .move(edge: .top).combined(with: .opacity),
                                         removal: .opacity
@@ -288,7 +296,23 @@ struct DesktopWidgetView: View {
                 .background(ScrollWheelCatcher { delta in
                     offset = min(max(offset - delta, 0), maxOffset)
                 })
-                .animation(.spring(response: 0.5, dampingFraction: 0.85), value: articles.map(\.id))
+                .animation(.spring(response: 0.5, dampingFraction: 0.85), value: ids)
+            }
+        }
+        // Arrivals (a fetch, a sync merge, a local event) are marked so a
+        // glance tells what is new since the last look; what was already
+        // there when the widget appeared is not. The mark lifts after
+        // `freshDuration`, batch by batch.
+        .onAppear { knownIDs = Set(ids) }
+        .onChange(of: ids) { _, now in
+            let current = Set(now)
+            defer { knownIDs = current }
+            guard let known = knownIDs else { return }
+            let arrived = current.subtracting(known)
+            guard !arrived.isEmpty else { return }
+            freshIDs.formUnion(arrived)
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.freshDuration) {
+                withAnimation(.easeOut(duration: 1.2)) { freshIDs.subtract(arrived) }
             }
         }
     }
@@ -349,6 +373,9 @@ struct DesktopWidgetRow: View {
     @EnvironmentObject var store: AppStore
     let article: Article
     let titleSize: Double
+    /// Arrived since the widget was last looked at: tinted, with a bar at
+    /// the leading edge, for the few seconds after a refresh.
+    var fresh = false
     @State private var hovering = false
 
     /// The source and time line, a bit over half the title: readable from
@@ -386,20 +413,26 @@ struct DesktopWidgetRow: View {
             }
 
             Spacer(minLength: 0)
-
-            RowActionButton(
-                icon: "xmark",
-                help: "Clear now (recoverable for 24 hours)",
-                visible: hovering
-            ) {
-                store.clear(article)
-            }
-            .padding(.top, titleSize * 0.2)
+            // no × here: the widget is for reading at a glance, and Clear
+            // Now stays in the context menu
         }
         .padding(.horizontal, 22)
         .padding(.vertical, titleSize * 0.35)
         .contentShape(Rectangle())
         .background(hovering ? Color.primary.opacity(0.06) : .clear, in: RoundedRectangle(cornerRadius: 12))
+        .background {
+            // the arrival mark, under the hover fill; it lifts with a fade
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.accentColor.opacity(0.22))
+                .overlay(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color.accentColor)
+                        .frame(width: 5)
+                        .padding(.vertical, 8)
+                        .padding(.leading, 6)
+                }
+                .opacity(fresh ? 1 : 0)
+        }
         .padding(.horizontal, 8)
         .onTapGesture { store.open(article) }
         .onHover { hovering = $0 }
