@@ -351,15 +351,14 @@ struct DesktopWidgetRow: View {
     let titleSize: Double
     @State private var hovering = false
 
-    private var metaSize: Double { max(12, titleSize * 0.42) }
+    /// The source and time line, a bit over half the title: readable from
+    /// across the room like the title is.
+    private var metaSize: Double { max(13, titleSize * 0.55) }
 
     var body: some View {
+        // No unread dot: at this size it cost a column of width for what
+        // the title's weight and colour already say.
         HStack(alignment: .top, spacing: titleSize * 0.4) {
-            Circle()
-                .fill(article.isRead ? Color.clear : Color.accentColor)
-                .frame(width: titleSize * 0.3, height: titleSize * 0.3)
-                .padding(.top, titleSize * 0.42)
-
             VStack(alignment: .leading, spacing: titleSize * 0.18) {
                 Text(article.title)
                     .font(.system(size: titleSize, weight: article.isRead ? .medium : .bold))
