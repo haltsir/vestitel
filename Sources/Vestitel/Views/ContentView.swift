@@ -35,21 +35,34 @@ struct ContentView: View {
             }
         }
         .frame(width: 500, height: 600)
-        .onAppear {
-            store.popoverOpen = true
+        // Popover visibility drives the "is the app open" signal. Before
+        // macOS 27 the content was built on every open and torn down on
+        // close, so onAppear/onDisappear paired up; since macOS 27 the
+        // window is built once and merely ordered in and out, onAppear
+        // fires on the first open only and onDisappear never, which left
+        // popoverOpen stuck at true and the inbox hold never lifting. The
+        // probe reports the window's own visibility, so both are wired to
+        // one idempotent handler and whichever fires first wins.
+        .onAppear { popoverVisibilityChanged(true) }
+        .onDisappear { popoverVisibilityChanged(false) }
+        .background(PopoverVisibilityProbe { visible in popoverVisibilityChanged(visible) })
+        .onChange(of: tab) { _, newTab in
+            store.updateInboxHold(active: store.popoverOpen && newTab == .inbox)
+        }
+    }
+
+    private func popoverVisibilityChanged(_ visible: Bool) {
+        guard store.popoverOpen != visible else { return }
+        store.popoverOpen = visible
+        if visible {
             // hold before markSeen: its sync merge must land behind the hold
             store.updateInboxHold(active: tab == .inbox)
             store.markSeen()
-        }
-        .onDisappear {
-            store.popoverOpen = false
+        } else {
             store.updateInboxHold(active: false)
             // a staged update installs the moment the popover closes,
             // instead of waiting for the next sweep tick
             store.installStagedUpdateIfIdle()
-        }
-        .onChange(of: tab) { _, newTab in
-            store.updateInboxHold(active: store.popoverOpen && newTab == .inbox)
         }
     }
 
@@ -1012,5 +1025,56 @@ extension View {
     /// Put this on the content of a ScrollView (see `OverlayScrollers`).
     func overlayScrollers() -> some View {
         background(OverlayScrollers().frame(width: 0, height: 0))
+    }
+}
+
+/// Reports whether the hosting window is on screen: once when the view
+/// lands in a window, then on every order-in/out (the window's occlusion
+/// state changes with them) and when the window closes. Needed because a
+/// MenuBarExtra window is reused across opens on macOS 27, so SwiftUI's
+/// onAppear/onDisappear no longer track the popover (see ContentView).
+private struct PopoverVisibilityProbe: NSViewRepresentable {
+    let onChange: (Bool) -> Void
+
+    final class Probe: NSView {
+        var onChange: ((Bool) -> Void)?
+        private var observers: [NSObjectProtocol] = []
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            observers.forEach(NotificationCenter.default.removeObserver)
+            observers = []
+            guard let window else {
+                onChange?(false)
+                return
+            }
+            let center = NotificationCenter.default
+            observers.append(center.addObserver(
+                forName: NSWindow.didChangeOcclusionStateNotification, object: window, queue: .main
+            ) { [weak self, weak window] _ in
+                guard let self, let window else { return }
+                self.onChange?(window.isVisible)
+            })
+            observers.append(center.addObserver(
+                forName: NSWindow.willCloseNotification, object: window, queue: .main
+            ) { [weak self] _ in
+                self?.onChange?(false)
+            })
+            onChange?(window.isVisible)
+        }
+
+        deinit {
+            observers.forEach(NotificationCenter.default.removeObserver)
+        }
+    }
+
+    func makeNSView(context: Context) -> Probe {
+        let view = Probe()
+        view.onChange = onChange
+        return view
+    }
+
+    func updateNSView(_ nsView: Probe, context: Context) {
+        nsView.onChange = onChange
     }
 }
