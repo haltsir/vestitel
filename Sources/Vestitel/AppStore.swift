@@ -12,6 +12,16 @@ struct FeedBlockedError: Error, LocalizedError {
     }
 }
 
+/// The site answered with an error status and no feed (a WordPress
+/// "500 Internal Server Error" page, a 404 for a moved feed…).
+struct FeedHTTPError: Error, LocalizedError {
+    let status: Int
+    var errorDescription: String? {
+        let reason = HTTPURLResponse.localizedString(forStatusCode: status)
+        return "The server answered HTTP \(status) (\(reason)) instead of a feed."
+    }
+}
+
 @MainActor
 final class AppStore: ObservableObject {
 
@@ -713,6 +723,11 @@ final class AppStore: ObservableObject {
             } catch {
                 if Self.looksBlocked(response: response, data: data) {
                     return .failure(FeedBlockedError(host: feed.url.host ?? "The site"))
+                }
+                // A server error page is HTML, so the parser's complaint
+                // about it is noise: the status code is the real story.
+                if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                    return .failure(FeedHTTPError(status: http.statusCode))
                 }
                 return .failure(error)
             }

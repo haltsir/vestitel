@@ -46,6 +46,22 @@ final class FeedParser: NSObject, XMLParserDelegate {
     private var atomLinkCandidate: String?
 
     static func parse(data: Data) throws -> ParsedFeed {
+        do {
+            return try parseStrict(data: data)
+        } catch ParseError.malformed(let detail) {
+            // Publishers ship feeds with an unescaped quote inside an
+            // attribute value (boulevardbulgaria.bg: url='.../Giro_d'Italia.jpg'),
+            // which XMLParser rejects outright. Repair that one defect and
+            // retry; a feed that still fails reports the original error.
+            guard let repaired = repairAttributeQuotes(in: data),
+                  let parsed = try? parseStrict(data: repaired) else {
+                throw ParseError.malformed(detail)
+            }
+            return parsed
+        }
+    }
+
+    private static func parseStrict(data: Data) throws -> ParsedFeed {
         let delegate = FeedParser()
         let parser = XMLParser(data: data)
         parser.delegate = delegate
@@ -59,6 +75,111 @@ final class FeedParser: NSObject, XMLParserDelegate {
             title: delegate.feedTitle.trimmingCharacters(in: .whitespacesAndNewlines),
             items: delegate.items
         )
+    }
+
+    /// Escapes stray quote characters inside attribute values of start
+    /// tags: a quote matching the opening one closes the value only when
+    /// what follows is the end of the tag, a `/`, or another `name=`;
+    /// any other one becomes `&apos;` / `&quot;`. Only UTF-8 input is
+    /// touched (re-encoding a feed declared in another charset would
+    /// break it); nil means nothing was changed.
+    static func repairAttributeQuotes(in data: Data) -> Data? {
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
+        let chars = Array(text.unicodeScalars)
+        var out = String.UnicodeScalarView()
+        out.reserveCapacity(chars.count)
+        var i = 0
+        var changed = false
+
+        func isNameStart(_ c: Unicode.Scalar) -> Bool {
+            c == "_" || c == ":" || (c.properties.isAlphabetic && c.isASCII)
+        }
+        func isNameChar(_ c: Unicode.Scalar) -> Bool {
+            isNameStart(c) || c == "-" || c == "." || (c.isASCII && c.properties.numericType != nil)
+        }
+        func isSpace(_ c: Unicode.Scalar) -> Bool {
+            c == " " || c == "\t" || c == "\n" || c == "\r"
+        }
+        /// True when a quote at `pos` (inside an attribute value) is the
+        /// closing one: only tag end, `/`, or `name=` may follow.
+        func closesValue(at pos: Int, tagEnd: Int) -> Bool {
+            var k = pos + 1
+            while k < tagEnd, isSpace(chars[k]) { k += 1 }
+            if k >= tagEnd { return true }
+            if chars[k] == "/" || chars[k] == "?" { return true }
+            guard isNameStart(chars[k]) else { return false }
+            while k < tagEnd, isNameChar(chars[k]) { k += 1 }
+            while k < tagEnd, isSpace(chars[k]) { k += 1 }
+            return k < tagEnd && chars[k] == "="
+        }
+
+        while i < chars.count {
+            let c = chars[i]
+            guard c == "<", i + 1 < chars.count else { out.append(c); i += 1; continue }
+            let next = chars[i + 1]
+            // Comments, CDATA, processing instructions and end tags carry
+            // no attributes: copy them through verbatim.
+            if next == "!" || next == "?" || next == "/" {
+                let terminator: [Unicode.Scalar]
+                if next == "!", i + 3 < chars.count, chars[i + 2] == "-", chars[i + 3] == "-" {
+                    terminator = ["-", "-", ">"]
+                } else if next == "!", i + 8 < chars.count,
+                          String(String.UnicodeScalarView(chars[(i + 2)...(i + 8)])) == "[CDATA[" {
+                    terminator = ["]", "]", ">"]
+                } else {
+                    terminator = [">"]
+                }
+                var k = i
+                while k < chars.count {
+                    if chars[k] == terminator.last!,
+                       k + 1 >= terminator.count,
+                       Array(chars[(k + 1 - terminator.count)...k]) == terminator {
+                        break
+                    }
+                    k += 1
+                }
+                let end = min(k + 1, chars.count)
+                out.append(contentsOf: chars[i..<end])
+                i = end
+                continue
+            }
+            guard isNameStart(next) else { out.append(c); i += 1; continue }
+            // A start tag: find its end, then walk attribute values.
+            guard let tagEnd = chars[i...].firstIndex(of: ">") else {
+                out.append(contentsOf: chars[i...])
+                break
+            }
+            var k = i
+            while k < tagEnd {
+                let ch = chars[k]
+                if ch == "=" {
+                    out.append(ch)
+                    k += 1
+                    while k < tagEnd, isSpace(chars[k]) { out.append(chars[k]); k += 1 }
+                    guard k < tagEnd, chars[k] == "'" || chars[k] == "\"" else { continue }
+                    let quote = chars[k]
+                    out.append(quote)
+                    k += 1
+                    while k < tagEnd {
+                        if chars[k] == quote {
+                            if closesValue(at: k, tagEnd: tagEnd) { break }
+                            out.append(contentsOf: (quote == "'" ? "&apos;" : "&quot;").unicodeScalars)
+                            changed = true
+                        } else {
+                            out.append(chars[k])
+                        }
+                        k += 1
+                    }
+                    continue
+                }
+                out.append(ch)
+                k += 1
+            }
+            out.append(contentsOf: chars[k...tagEnd])
+            i = tagEnd + 1
+        }
+        guard changed else { return nil }
+        return Data(String(out).utf8)
     }
 
     // MARK: XMLParserDelegate
