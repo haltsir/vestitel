@@ -97,6 +97,24 @@ struct TopicGrouperTests {
         #expect(TopicGrouper.group(tournament, sensitivity: 0.5).count == 5)
     }
 
+    @Test @MainActor func quotedPhraseMatchesPlainWording() {
+        // One paper quotes the phrase, the other writes it plainly: the
+        // quote is matched against the other title's word pairs, function
+        // words and numbers included ("столица на туризма 2027").
+        let slapp = [
+            article("Разследване за скрининга на рак доведе до \"дело шамар\" срещу журналистка от \"Капитал\""),
+            article("Темата за скрининга на рак роди ново дело шамар", minutesAgo: 30),
+        ]
+        let group = TopicGrouper.group(slapp, sensitivity: 0.5)
+        #expect(group.count == 1)
+        #expect(group.first?.headline?.contains("дело шамар") == true)
+        let capital = [
+            article("София е сред финалистите за Европейска столица на туризма 2027"),
+            article("София е сред финалистите за \"Европейска столица на туризма 2027\"", minutesAgo: 10),
+        ]
+        #expect(TopicGrouper.group(capital, sensitivity: 0.5).count == 1)
+    }
+
     @Test @MainActor func stemmerFoldsInflections() {
         for (forms, stem) in [
             (["точки", "точка", "точките"], "точк"),

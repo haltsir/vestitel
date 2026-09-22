@@ -156,6 +156,11 @@ enum TopicGrouper {
         /// What pins a title to a story beyond its single words: adjacent
         /// word pairs ("руски военни") and single quoted words („Петрохан“).
         var anchors: Set<String> = []
+        /// The word pairs again, with short function words skipped
+        /// ("столица на туризма" → "столиц туризм"): only for recognising a
+        /// phrase that another title quotes (see plainMatches). Too loose
+        /// for `anchors` itself: "войната в Иран" would tie every Iran story.
+        var phraseAnchors: Set<String> = []
     }
 
     /// The name tagger is model-backed and not free; memoize like vectors.
@@ -204,18 +209,20 @@ enum TopicGrouper {
             result.tokens.insert(name)
             result.names.insert(name)
         }
-        var previous: String?
+        var previous: String?        // last kept word, nil after any dropped word
+        var previousLoose: String?   // last kept word, nil after a dropped word of 3+ letters
         for word in words(in: remainder[...]) {
             var single = Set<String>()
             insertWord(word, into: &single)
             result.tokens.formUnion(single)
-            // Consecutive kept words make a bigram anchor; a stopword or
-            // dropped word between two words breaks the chain.
             if let token = single.first {
                 if let previous { result.anchors.insert(previous + " " + token) }
+                if let previousLoose { result.phraseAnchors.insert(previousLoose + " " + token) }
                 previous = token
+                previousLoose = token
             } else {
                 previous = nil
+                if word.count >= 3 { previousLoose = nil }
             }
         }
         tokenCache[title] = result
@@ -406,6 +413,23 @@ enum TopicGrouper {
         result.insert(stem(raw))
     }
 
+    /// How many of `phrases` (multi-word quoted phrases) occur as plain
+    /// running text in `other`, i.e. every adjacent word pair of the phrase
+    /// is one of its phrase anchors. Phrases already shared as tokens are skipped.
+    private static func plainMatches(of phrases: Set<String>, in other: TitleTokens, except shared: Set<String>) -> Int {
+        var count = 0
+        for phrase in phrases where !shared.contains(phrase) {
+            // Phrase words are stemmed but unfiltered, so drop what the
+            // anchors never carry: function words and numbers
+            // ("европейск столиц на туризм 2027" → европейск столиц туризм).
+            let words = phrase.components(separatedBy: " ").filter { $0.count >= 3 && Int($0) == nil }
+            guard words.count >= 2 else { continue }
+            let pairs = zip(words, words.dropFirst()).map { "\($0) \($1)" }
+            if pairs.allSatisfy(other.phraseAnchors.contains) { count += 1 }
+        }
+        return count
+    }
+
     static func group(_ articles: [Article], sensitivity: Double) -> [TopicGroup] {
         guard articles.count > 1 else {
             return articles.map { singleton($0) }
@@ -484,9 +508,16 @@ enum TopicGrouper {
                 // One shared word or name is never the same story — it takes
                 // at least two shared things (or one quoted phrase) to link.
                 guard sharedWeight >= 2 else { continue }
+                // A phrase quoted in one title and written plainly in the
+                // other ("дело шамар" / „дело шамар“) is the same phrase:
+                // it matches when every adjacent pair of its words is an
+                // anchor of the other title, and counts like a shared quote.
+                let plainPhrases = plainMatches(of: tokenSets[i].quoted, in: tokenSets[j], except: shared)
+                    + plainMatches(of: tokenSets[j].quoted, in: tokenSets[i], except: shared)
+                sharedWeight += 2 * plainPhrases
                 let specific = shared.contains {
                     quoted.contains($0) || names.contains($0) || (postings[$0]?.count ?? 0) <= specificCeiling
-                } || !tokenSets[i].anchors.isDisjoint(with: tokenSets[j].anchors)
+                } || plainPhrases > 0 || !tokenSets[i].anchors.isDisjoint(with: tokenSets[j].anchors)
                 // A shared full name plus one more shared word is the same
                 // story: "Пресли Гербер" + "смъртта" across two obituaries
                 // whose wording otherwise differs too much for Jaccard.
@@ -581,9 +612,15 @@ enum TopicGrouper {
     private static func headline(for tokenSets: [TitleTokens], titles: [String]) -> String {
         var counts: [String: Int] = [:]
         var quotedTokens = Set<String>()
+        for set in tokenSets { quotedTokens.formUnion(set.quoted) }
         for set in tokenSets {
             for t in set.tokens { counts[t, default: 0] += 1 }
-            quotedTokens.formUnion(set.quoted)
+            // a phrase another member quotes and this one writes plainly
+            // is shared with it too (see plainMatches)
+            for phrase in quotedTokens where !set.tokens.contains(phrase)
+                && plainMatches(of: [phrase], in: set, except: []) > 0 {
+                counts[phrase, default: 0] += 1
+            }
         }
         let majority = (tokenSets.count + 1) / 2
         let candidates = counts.filter { $0.value > majority || $0.value == tokenSets.count }
