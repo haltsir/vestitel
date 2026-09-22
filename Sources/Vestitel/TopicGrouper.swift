@@ -153,6 +153,9 @@ enum TopicGrouper {
         var tokens: Set<String> = []
         var quoted: Set<String> = []
         var names: Set<String> = []
+        /// What pins a title to a story beyond its single words: adjacent
+        /// word pairs ("руски военни") and single quoted words („Петрохан“).
+        var anchors: Set<String> = []
     }
 
     /// The name tagger is model-backed and not free; memoize like vectors.
@@ -184,6 +187,7 @@ enum TopicGrouper {
                     }
                 } else if let word = words.first {
                     insertWord(word, into: &result.tokens)
+                    result.anchors.insert(stem(word.lowercased()))
                 }
             }
         }
@@ -200,8 +204,19 @@ enum TopicGrouper {
             result.tokens.insert(name)
             result.names.insert(name)
         }
+        var previous: String?
         for word in words(in: remainder[...]) {
-            insertWord(word, into: &result.tokens)
+            var single = Set<String>()
+            insertWord(word, into: &single)
+            result.tokens.formUnion(single)
+            // Consecutive kept words make a bigram anchor; a stopword or
+            // dropped word between two words breaks the chain.
+            if let token = single.first {
+                if let previous { result.anchors.insert(previous + " " + token) }
+                previous = token
+            } else {
+                previous = nil
+            }
         }
         tokenCache[title] = result
         return result
@@ -428,6 +443,14 @@ enum TopicGrouper {
         for i in articles.indices {
             for token in tokenSets[i].tokens { postings[token, default: []].append(i) }
         }
+        // Three shared words link a pair outright, but only when something
+        // pins them to one story: a word found in few titles ("Waracle",
+        // "iX5", "котка"), a quoted phrase or name, or a shared anchor
+        // (an adjacent pair like "руски военни", a quoted „Петрохан“).
+        // "нов" + "план" + "София" are each in dozens of headlines and
+        // scattered through both titles, and chained a company's office
+        // move to the city's transport loan.
+        let specificCeiling = max(3, articles.count / 200)
         var sharedCount: [Int: Int] = [:]
         var quotedHit = Set<Int>()
         for i in articles.indices {
@@ -461,7 +484,19 @@ enum TopicGrouper {
                 // One shared word or name is never the same story — it takes
                 // at least two shared things (or one quoted phrase) to link.
                 guard sharedWeight >= 2 else { continue }
-                if jaccard >= jaccardThreshold || sharedWeight >= 3 {
+                let specific = shared.contains {
+                    quoted.contains($0) || names.contains($0) || (postings[$0]?.count ?? 0) <= specificCeiling
+                } || !tokenSets[i].anchors.isDisjoint(with: tokenSets[j].anchors)
+                // A shared full name plus one more shared word is the same
+                // story: "Пресли Гербер" + "смъртта" across two obituaries
+                // whose wording otherwise differs too much for Jaccard.
+                // Only a name found in few titles counts: "US Open" or
+                // "Лига Европа" names a tournament every match report
+                // carries, and would gather a whole rubric into one group.
+                let sharedName = shared.contains {
+                    names.contains($0) && (postings[$0]?.count ?? 0) <= specificCeiling
+                }
+                if jaccard >= jaccardThreshold || (sharedWeight >= 3 && specific) || sharedName {
                     union(i, j)
                     continue
                 }

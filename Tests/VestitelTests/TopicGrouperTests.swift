@@ -41,6 +41,62 @@ struct TopicGrouperTests {
         #expect(TopicGrouper.group(anchored, sensitivity: 0.5).count == 1)
     }
 
+    @Test @MainActor func threeCommonScatteredWordsDoNotLink() {
+        // "нов", "план" and "София" each sit in many headlines: shared
+        // between an office move and a transport loan they are noise,
+        // and with none of them specific the three-word shortcut is off.
+        var fillers: [Article] = []
+        for i in 0..<4 {
+            // each filler shares nothing with the others but the common word
+            fillers.append(article("Нов ресторант\(i) отвори\(i) в квартал\(i)"))
+            fillers.append(article("Кабинетът\(i) прие\(i) план за язовир\(i)"))
+            fillers.append(article("В София засадиха\(i) дървета\(i) по булевард\(i)"))
+        }
+        let scattered = fillers + [
+            article("Waracle се премести в нов офис в София, запазва плановете си за разрастване"),
+            article("София поема дълг от 367 млн. евро за мащабен план за нов транспорт и булеварди"),
+        ]
+        let groups = TopicGrouper.group(scattered, sensitivity: 0.5)
+        #expect(groups.allSatisfy { $0.articles.count == 1 })
+
+        // An adjacent pair shared by both titles ("руски военни") pins
+        // them to one story even when every shared word is common.
+        var soldiers: [Article] = []
+        for i in 0..<4 {
+            soldiers.append(article("Руски кораб\(i) акостира\(i) в пристанище\(i)"))
+            soldiers.append(article("Военни учения\(i) край полигон\(i) събраха\(i)"))
+            soldiers.append(article("България подписа\(i) договор\(i) за мост\(i)"))
+        }
+        soldiers += [
+            article("\"Алфа Метал\" отрича британски публикации: Не обучаваме руски военни в България"),
+            article("\"Да, България\" пита службите обучавани ли са руски военни в България"),
+        ]
+        let linked = TopicGrouper.group(soldiers, sensitivity: 0.5).filter { $0.articles.count > 1 }
+        #expect(linked.count == 1)
+        #expect(linked.first?.articles.count == 2)
+    }
+
+    @Test @MainActor func rareSharedNamePlusOneWordLinks() {
+        // Same person, one more shared word, wording too different for
+        // Jaccard: the shared full name is what makes it one story.
+        let obituary = [
+            article("Първа версия за смъртта на Пресли Гербер, починал е от предполагаемо предозиране"),
+            article("Свръхдоза е вероятната причина за смъртта на Пресли Гербер", minutesAgo: 5),
+        ]
+        #expect(TopicGrouper.group(obituary, sensitivity: 0.5).count == 1)
+
+        // A name every match report carries ("US Open") is a rubric, not
+        // a story: with it in more than a few titles the rule stays off.
+        let tournament = [
+            article("Александър Зверев спечели US Open и вече има две титли от Шлема"),
+            article("Рибакина свали Сабаленка от трона и спечели US Open за първи път"),
+            article("Пълна драма на US Open, шампионът бе детрониран посред нощ"),
+            article("Нощ за историята на US Open, първи белгийски четвъртфиналист"),
+            article("Спортът по телевизията: дербита, Левски, Барса и финал на US Open"),
+        ]
+        #expect(TopicGrouper.group(tournament, sensitivity: 0.5).count == 5)
+    }
+
     @Test @MainActor func stemmerFoldsInflections() {
         for (forms, stem) in [
             (["точки", "точка", "точките"], "точк"),
