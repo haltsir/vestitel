@@ -84,6 +84,12 @@ enum TopicGrouper {
         "показаха", "дойде", "идва", "идват", "вижте", "гледайте",
         "очаква", "очакват", "излезе", "излиза", "дава", "дават", "даде",
         "получи", "получава",
+        // parliamentary boilerplate: "приеха на първо четене" is how
+        // every bill is reported, not what the bill is about
+        "прие", "приеха", "приема", "приемат", "приет", "приета", "прието",
+        "приети", "приемане", "приемането", "четене", "четенето", "гласува",
+        "гласуваха", "гласуване", "гласуването", "одобри", "одобриха",
+        "одобрява", "внесе", "внесоха", "внася",
         // Bulgarian: news-rubric and quantity noise
         "видео", "снимки", "снимка", "новини", "новина", "нови", "новият",
         "новия", "новите", "нова", "ново", "млн", "млрд", "хил",
@@ -156,19 +162,42 @@ enum TopicGrouper {
         /// What pins a title to a story beyond its single words: adjacent
         /// word pairs ("руски военни") and single quoted words („Петрохан“).
         var anchors: Set<String> = []
+        /// Precise amounts with a magnitude ("#1.2 млрд"), see amountToken;
+        /// also in `quoted`, as is a bare precise number ("#3.75").
+        var amounts: Set<String> = []
         /// The word pairs again, with short function words skipped
         /// ("столица на туризма" → "столиц туризм"): only for recognising a
         /// phrase that another title quotes (see plainMatches). Too loose
         /// for `anchors` itself: "войната в Иран" would tie every Iran story.
         var phraseAnchors: Set<String> = []
+        /// Specific items from the summary's opening sentences (multi-word
+        /// names, quoted phrases, amounts), in token form. Secondary
+        /// evidence, used only by the strong rules (a rare shared name
+        /// plus a title word, a shared amount, one name in two scripts):
+        /// a summary mentions every party to a story, so as ordinary
+        /// weight it chained everything that mentioned the same minister.
+        var context: Set<String> = []
+        /// The multi-word names among `context`.
+        var contextNames: Set<String> = []
+        /// Latin key (see latinKey) → source token, for every multi-word
+        /// name and quoted phrase in title and context: "Шелли груп" and
+        /// "Shelly Group" meet here as "shelli grup".
+        var latin: [String: String] = [:]
+    }
+
+    /// A multi-word name as a token (stemmed, lowercased) and its Latin key.
+    struct NameRun {
+        var token: String
+        var latin: String
     }
 
     /// The name tagger is model-backed and not free; memoize like vectors.
     /// Main-thread only.
     private static var tokenCache: [String: TitleTokens] = [:]
 
-    static func tokens(_ title: String) -> TitleTokens {
-        if let cached = tokenCache[title] { return cached }
+    static func tokens(_ title: String, summary: String? = nil) -> TitleTokens {
+        let cacheKey = summary.map { title + "\u{0}" + $0 } ?? title
+        if let cached = tokenCache[cacheKey] { return cached }
         if tokenCache.count > 2000 { tokenCache.removeAll() }
         var result = TitleTokens()
         // Original case, not lowercased: the name tagger keys on capitals.
@@ -189,6 +218,7 @@ enum TopicGrouper {
                     if phrase.count >= 3 {
                         result.tokens.insert(phrase)
                         result.quoted.insert(phrase)
+                        result.latin[latinKey(words)] = phrase
                     }
                 } else if let word = words.first {
                     insertWord(word, into: &result.tokens)
@@ -201,17 +231,29 @@ enum TopicGrouper {
         // phrase token so a shared name reads as one shared thing, not two.
         // Their component words still enter the set individually — "Trump" in
         // one title must keep matching "Donald Trump" in another.
-        for name in namePhrases(in: remainder) {
-            result.tokens.insert(name)
-            result.names.insert(name)
+        for name in namePhrases(in: remainder) + capitalisedRuns(in: remainder) {
+            result.tokens.insert(name.token)
+            result.names.insert(name.token)
+            result.latin[name.latin] = name.token
         }
-        for name in capitalisedRuns(in: remainder) {
-            result.tokens.insert(name)
-            result.names.insert(name)
+        // A precise amount ("1,2 млрд. евро", "367 млн. евро") is as good
+        // as a quoted phrase: two headlines carrying the same one within
+        // a day are the same deal, loan or fine, however differently the
+        // parties are named (Shelly Group / "Шелли груп" / "български
+        // еднорог"). Round figures ("100 долара", "500 хил.") are not.
+        let plainWords = words(in: remainder[...])
+        for (index, word) in plainWords.enumerated() {
+            if let amount = amountToken(word, next: index + 1 < plainWords.count ? plainWords[index + 1] : nil) {
+                result.tokens.insert(amount)
+                result.quoted.insert(amount)
+                // A bare number ("250 мм", "250 кв. метра") is not an
+                // amount: it counts like a quote but never links alone.
+                if amount.contains(" ") { result.amounts.insert(amount) }
+            }
         }
         var previous: String?        // last kept word, nil after any dropped word
         var previousLoose: String?   // last kept word, nil after a dropped word of 3+ letters
-        for word in words(in: remainder[...]) {
+        for word in plainWords {
             var single = Set<String>()
             insertWord(word, into: &single)
             result.tokens.formUnion(single)
@@ -225,8 +267,104 @@ enum TopicGrouper {
                 if word.count >= 3 { previousLoose = nil }
             }
         }
-        tokenCache[title] = result
+        if let summary { addContext(from: summary, to: &result) }
+        tokenCache[cacheKey] = result
         return result
+    }
+
+    /// Adds the specific items of a summary's opening (about two
+    /// sentences) as secondary evidence: quoted phrases, multi-word names
+    /// and precise amounts. Plain and single Latin words are left out on
+    /// purpose: a summary mentions the city, the minister and the file
+    /// name, and as evidence those chained every story of the week.
+    private static func addContext(from summary: String, to result: inout TitleTokens) {
+        var excerpt = String(summary.prefix(400))
+        if let cut = excerpt.range(of: ". ", range: excerpt.index(excerpt.startIndex, offsetBy: min(160, excerpt.count))..<excerpt.endIndex) {
+            excerpt = String(excerpt[..<cut.lowerBound])
+        }
+        var remainder = excerpt
+        for (open, close) in quotePairs {
+            while let openRange = remainder.range(of: open),
+                  let closeRange = remainder.range(of: close, range: openRange.upperBound..<remainder.endIndex) {
+                let words = words(in: remainder[openRange.upperBound..<closeRange.lowerBound])
+                remainder.removeSubrange(openRange.lowerBound..<closeRange.upperBound)
+                guard words.count > 1 else { continue }
+                let phrase = words.map { stem($0.lowercased()) }.joined(separator: " ")
+                guard phrase.count >= 3, !result.tokens.contains(phrase) else { continue }
+                result.context.insert(phrase)
+                result.contextNames.insert(phrase)
+                result.latin[latinKey(words)] = phrase
+            }
+        }
+        for name in namePhrases(in: remainder) + capitalisedRuns(in: remainder) where !result.tokens.contains(name.token) {
+            result.context.insert(name.token)
+            result.contextNames.insert(name.token)
+            result.latin[name.latin] = name.token
+        }
+        let plainWords = words(in: remainder[...])
+        for (index, word) in plainWords.enumerated() {
+            if let amount = amountToken(word, next: index + 1 < plainWords.count ? plainWords[index + 1] : nil),
+               amount.contains(" "), !result.tokens.contains(amount) {
+                result.context.insert(amount)
+                result.amounts.insert(amount)
+            }
+        }
+    }
+
+    private static let cyrillicToLatin: [Character: String] = [
+        "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ж": "zh", "з": "z", "и": "i",
+        "й": "i", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o", "п": "p", "р": "r", "с": "s",
+        "т": "t", "у": "u", "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sht",
+        "ъ": "a", "ь": "y", "ю": "yu", "я": "ya", "ё": "yo", "э": "e", "ы": "i",
+    ]
+
+    /// A script-independent key for a name: Cyrillic is transliterated,
+    /// then both scripts are flattened to a rough phonetic form ("sch"→"sh",
+    /// "c"→"k"/"s", "y"→"i", "ou"→"u", doubles collapsed), so "Шелли груп"
+    /// and "Shelly Group" both become "shelli grup", "Шнайдер Електрик"
+    /// and "Schneider Electric" both "shnaider elektrik".
+    static func latinKey(_ words: [String]) -> String {
+        words.map { word -> String in
+            var latin = ""
+            for ch in word.lowercased() {
+                if let t = cyrillicToLatin[ch] { latin += t }
+                else if ch.isLetter { latin.append(ch) }
+            }
+            let rules: [(String, String)] = [
+                ("sch", "sh"), ("tsch", "ch"), ("tch", "ch"), ("ph", "f"), ("th", "t"), ("ck", "k"),
+                ("ce", "se"), ("ci", "si"), ("cy", "si"), ("c", "k"), ("q", "k"), ("x", "ks"),
+                ("w", "v"), ("ou", "u"), ("oo", "u"), ("ee", "i"), ("y", "i"), ("j", "i"),
+            ]
+            for (from, to) in rules { latin = latin.replacingOccurrences(of: from, with: to) }
+            var collapsed = ""
+            for ch in latin where collapsed.last != ch { collapsed.append(ch) }
+            return collapsed
+        }.filter { !$0.isEmpty }.joined(separator: " ")
+    }
+
+    /// Edit distance, for the Latin keys the flattening leaves a letter
+    /// apart ("shnaider" / "shneider").
+    static func editDistance(_ a: String, _ b: String) -> Int {
+        let a = Array(a), b = Array(b)
+        if a.isEmpty { return b.count }
+        if b.isEmpty { return a.count }
+        var previous = Array(0...b.count)
+        var current = Array(repeating: 0, count: b.count + 1)
+        for i in 1...a.count {
+            current[0] = i
+            for j in 1...b.count {
+                current[j] = min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1))
+            }
+            swap(&previous, &current)
+        }
+        return previous[b.count]
+    }
+
+    /// True when two Latin keys are the same name give or take a letter
+    /// in five (and they are not identical, which the index handles).
+    static func similarLatin(_ a: String, _ b: String) -> Bool {
+        guard a != b, a.count >= 5, b.count >= 5 else { return false }
+        return editDistance(a, b) * 5 <= max(a.count, b.count)
     }
 
     /// Where the title proper starts after a rubric label ("Бизнес глобус:",
@@ -255,19 +393,20 @@ enum TopicGrouper {
     /// Multi-word named entities (people, places, organizations), lowercased
     /// and space-joined. English-only in practice — the nameType scheme has
     /// no Bulgarian model, so Bulgarian titles simply return nothing.
-    private static func namePhrases(in text: String) -> [String] {
+    private static func namePhrases(in text: String) -> [NameRun] {
         guard text.contains(where: \.isUppercase) else { return [] }
         let nameTags: Set<NLTag> = [.personalName, .placeName, .organizationName]
         nameTagger.string = text
-        var phrases: [String] = []
+        var phrases: [NameRun] = []
         nameTagger.enumerateTags(
             in: text.startIndex..<text.endIndex, unit: .word, scheme: .nameType,
             options: [.omitWhitespace, .omitPunctuation, .joinNames]
         ) { tag, range in
             if let tag, nameTags.contains(tag) {
-                let words = words(in: text[range]).map { stem($0.lowercased()) }
-                if words.count > 1 {
-                    phrases.append(words.joined(separator: " "))
+                let raw = words(in: text[range])
+                if raw.count > 1 {
+                    phrases.append(NameRun(token: raw.map { stem($0.lowercased()) }.joined(separator: " "),
+                                           latin: latinKey(raw)))
                 }
             }
             return true
@@ -282,33 +421,44 @@ enum TopicGrouper {
     /// sentence-initial word is skipped unless it is Latin script (a foreign
     /// name opening the title). Not applied to Latin-script titles, where
     /// Title Case headlines would turn every title into one phrase.
-    private static func capitalisedRuns(in text: String) -> [String] {
-        var cyrillic = 0, latin = 0
-        for s in text.unicodeScalars {
-            if (0x400...0x4FF).contains(s.value) { cyrillic += 1 }
-            else if (65...90).contains(s.value) || (97...122).contains(s.value) { latin += 1 }
+    private static func capitalisedRuns(in text: String) -> [NameRun] {
+        // Any Cyrillic makes it a Bulgarian title, however many Latin
+        // names it carries ("Shelly Group може да бъде продадена на
+        // Schneider Electric"). A Latin-only title is used too unless it
+        // is in Title Case, where every word would join one run.
+        let chunks = text.split(whereSeparator: { $0.isWhitespace })
+        if !text.unicodeScalars.contains(where: { (0x400...0x4FF).contains($0.value) }) {
+            let capitalised = chunks.dropFirst().filter { $0.first?.isUppercase == true }.count
+            guard chunks.count >= 3, capitalised * 2 < chunks.count else { return [] }
         }
-        guard cyrillic > latin else { return [] }
 
-        var phrases: [String] = []
+        var phrases: [NameRun] = []
         var run: [String] = []
         func flush() {
             if run.count > 1 {
                 let phrase = run.map { stem($0.lowercased()) }.joined(separator: " ")
-                if phrase.count >= 3 { phrases.append(phrase) }
+                if phrase.count >= 3 { phrases.append(NameRun(token: phrase, latin: latinKey(run))) }
             }
             run = []
         }
-        let chunks = text.split(whereSeparator: { $0.isWhitespace })
         for (index, chunk) in chunks.enumerated() {
             let chunkWords = words(in: chunk)
             guard let first = chunkWords.first, let letter = first.first, letter.isUppercase else {
                 flush()
                 continue
             }
-            let isLatin = letter.isASCII
-            if index == 0, !isLatin {
-                continue
+            // The sentence-initial word is capitalised anyway: it opens a
+            // run only when the next word is capitalised too ("Шнайдер
+            // Електрик купува", "Асен Василев:"), never on its own.
+            // Only a two-word run ("Шнайдер Електрик купува", "Асен
+            // Василев:"): a longer one starts with a common noun ("Филмът
+            // Woman Unknown", "Актрисата Матилд Арсел").
+            if index == 0, !letter.isASCII {
+                let pair = chunks.count > 1 && chunks[1].first?.isUppercase == true
+                    && !(chunk.last.map { !($0.isLetter || $0.isNumber) } ?? false)
+                    && (chunks.count == 2 || chunks[2].first?.isUppercase != true
+                        || chunks[1].last.map { !($0.isLetter || $0.isNumber) } == true)
+                if !pair { continue }
             }
             run.append(contentsOf: chunkWords)
             // punctuation after the word ends the name: "Арсел, която"
@@ -331,6 +481,12 @@ enum TopicGrouper {
             } else if s == "-", !current.isEmpty, i + 1 < scalars.count,
                       CharacterSet.alphanumerics.contains(scalars[i + 1]) {
                 current.append(s)
+            } else if s == "," || s == ".", !current.isEmpty, i + 1 < scalars.count,
+                      CharacterSet.decimalDigits.contains(scalars[i + 1]),
+                      CharacterSet.decimalDigits.contains(scalars[i - 1]) {
+                // a decimal separator inside a number: "1,2" and "3.75" are
+                // one word, normalised to a dot by amountToken
+                current.append(".")
             } else if !current.isEmpty {
                 words.append(String(current))
                 current = String.UnicodeScalarView()
@@ -404,12 +560,44 @@ enum TopicGrouper {
         return String(s)
     }
 
+    private static let magnitudes: [String: String] = [
+        "млн": "млн", "милион": "млн", "милиона": "млн", "милиони": "млн", "million": "млн", "mln": "млн",
+        "млрд": "млрд", "милиард": "млрд", "милиарда": "млрд", "милиарди": "млрд", "billion": "млрд", "bn": "млрд",
+        "хил": "хил", "хиляди": "хил", "thousand": "хил",
+    ]
+
+    /// "#1.2 млрд" for a number worth matching on: one with a decimal
+    /// part, or three or more digits that are neither a year (1900–2099)
+    /// nor a round hundred. A following magnitude word is folded in and
+    /// normalised, so "1,2 млрд." and "1.2 милиарда" are one token while
+    /// "1.2 млн" stays apart. Nil for anything else.
+    static func amountToken(_ word: String, next: String?) -> String? {
+        guard let first = word.unicodeScalars.first, CharacterSet.decimalDigits.contains(first),
+              word.unicodeScalars.allSatisfy({ CharacterSet.decimalDigits.contains($0) || $0 == "." })
+        else { return nil }
+        let precise: Bool
+        if word.contains(".") {
+            precise = true
+        } else if let value = Int(word), word.count >= 3 {
+            precise = !(1900...2099).contains(value) && value % 100 != 0
+        } else {
+            precise = false
+        }
+        guard precise else { return nil }
+        if let next, let magnitude = magnitudes[next.lowercased()] {
+            return "#\(word) \(magnitude)"
+        }
+        return "#\(word)"
+    }
+
     private static func insertWord(_ word: String, into result: inout Set<String>) {
         let raw = word.lowercased()
         // The stopword list holds surface forms and is checked before
         // stemming, so a stopword's stem never swallows a real word that
         // happens to share it ("прави" → "прав" must not drop "право").
-        guard raw.count >= 3, !stopwords.contains(raw), Int(raw) == nil else { return }
+        guard raw.count >= 3, !stopwords.contains(raw), Int(raw) == nil,
+              !raw.unicodeScalars.allSatisfy({ CharacterSet.decimalDigits.contains($0) || $0 == "." })
+        else { return }
         result.insert(stem(raw))
     }
 
@@ -435,7 +623,7 @@ enum TopicGrouper {
             return articles.map { singleton($0) }
         }
 
-        let tokenSets = articles.map { tokens($0.title) }
+        let tokenSets = articles.map { tokens($0.title, summary: $0.summary) }
         // sensitivity 0..1 maps to: jaccard threshold 0.6..0.3, embedding distance 0.55..0.95
         let jaccardThreshold = 0.6 - 0.3 * sensitivity
         let distanceThreshold = 0.55 + 0.4 * sensitivity
@@ -467,6 +655,16 @@ enum TopicGrouper {
         for i in articles.indices {
             for token in tokenSets[i].tokens { postings[token, default: []].append(i) }
         }
+        // Everything an article can be matched on: its tokens, its context
+        // and the Latin keys of its names ("~" so they never collide with
+        // a word). Only for finding candidate pairs and for how common a
+        // thing is; the weighting below reads the sets themselves.
+        var evidence: [String: [Int]] = [:]
+        for i in articles.indices {
+            for item in tokenSets[i].tokens.union(tokenSets[i].context) { evidence[item, default: []].append(i) }
+            for key in tokenSets[i].latin.keys { evidence["~" + key, default: []].append(i) }
+        }
+        func frequency(_ item: String) -> Int { evidence[item]?.count ?? 0 }
         // Three shared words link a pair outright, but only when something
         // pins them to one story: a word found in few titles ("Waracle",
         // "iX5", "котка"), a quoted phrase or name, or a shared anchor
@@ -480,13 +678,18 @@ enum TopicGrouper {
         for i in articles.indices {
             sharedCount.removeAll(keepingCapacity: true)
             quotedHit.removeAll(keepingCapacity: true)
-            for token in tokenSets[i].tokens {
-                guard let list = postings[token] else { continue }
-                let quoted = tokenSets[i].quoted.contains(token)
+            for token in tokenSets[i].tokens.union(tokenSets[i].context) {
+                guard let list = evidence[token] else { continue }
+                let quoted = tokenSets[i].quoted.contains(token) || tokenSets[i].amounts.contains(token)
                 for j in list where j > i {
                     sharedCount[j, default: 0] += 1
-                    if quoted || tokenSets[j].quoted.contains(token) { quotedHit.insert(j) }
+                    if quoted || tokenSets[j].quoted.contains(token) || tokenSets[j].amounts.contains(token) { quotedHit.insert(j) }
                 }
+            }
+            for key in tokenSets[i].latin.keys {
+                guard let list = evidence["~" + key] else { continue }
+                // a name in two scripts is worth a pair look on its own
+                for j in list where j > i { sharedCount[j, default: 0] += 2 }
             }
             for (j, count) in sharedCount where count >= 2 || quotedHit.contains(j) {
                 let shared = tokenSets[i].tokens.intersection(tokenSets[j].tokens)
@@ -504,6 +707,47 @@ enum TopicGrouper {
                 for name in shared where names.contains(name) {
                     sharedWeight -= name.split(separator: " ")
                         .filter { shared.contains(String($0)) }.count
+                }
+                // Context: a name, Latin word, quote or amount that one
+                // article's summary shares with the other's title or
+                // summary. Component words of a name already counted are
+                // skipped, as above.
+                let ti = tokenSets[i], tj = tokenSets[j]
+                var contextShared = ti.context.intersection(tj.tokens)
+                    .union(tj.context.intersection(ti.tokens))
+                    .union(ti.context.intersection(tj.context))
+                    .subtracting(shared)
+                let contextNames = ti.contextNames.union(tj.contextNames).union(names)
+                for name in contextShared.union(shared) where contextNames.contains(name) {
+                    for part in name.split(separator: " ") { contextShared.remove(String(part)) }
+                }
+                // The same name in two scripts: Latin keys that agree, or
+                // differ by a letter in five ("shnaider" / "shneider").
+                var scriptNames: [(token: String, frequency: Int)] = []
+                for (keyA, tokenA) in ti.latin where !shared.contains(tokenA) && !contextShared.contains(tokenA) {
+                    for (keyB, tokenB) in tj.latin where !shared.contains(tokenB) && !contextShared.contains(tokenB) && tokenA != tokenB {
+                        if keyA == keyB || similarLatin(keyA, keyB) {
+                            scriptNames.append((tokenA, max(frequency(tokenA), frequency(tokenB))))
+                            break
+                        }
+                    }
+                }
+                // Strong things: rare names, quoted phrases and amounts the
+                // two share anywhere (titles, summaries, across scripts).
+                // Two of them make a story on their own; one is only the
+                // cast list of a match report or a summary's passing
+                // mention, and never adds to the title rules below.
+                let strongCount = shared.union(contextShared).filter {
+                    ti.amounts.contains($0) || tj.amounts.contains($0) || quoted.contains($0)
+                        || (contextNames.contains($0) && frequency($0) <= specificCeiling)
+                }.count + scriptNames.filter { $0.frequency <= specificCeiling }.count
+                // An amount links alone only when both titles carry it; in
+                // a summary it is one strong thing among others (Škoda's
+                // 1.8 million cars sold met a city's €1,8 million in damages).
+                let sharedAmount = shared.contains { ti.amounts.contains($0) }
+                if strongCount >= 2 || sharedAmount {
+                    union(i, j)
+                    continue
                 }
                 // One shared word or name is never the same story — it takes
                 // at least two shared things (or one quoted phrase) to link.
@@ -652,7 +896,23 @@ enum TopicGrouper {
             var proper = false
             var position = Int.max
             let words = token.split(separator: " ").count
-            if token.contains(" ") {
+            if token.hasPrefix("#") {
+                // An amount: show it as the newest title writes it ("1,2
+                // млрд"), number plus the magnitude word that follows.
+                let parts = token.dropFirst().components(separatedBy: " ")
+                let number = parts[0].replacingOccurrences(of: ".", with: "[.,]")
+                let pattern = parts.count > 1 ? "\\b\(number)\\s*\\p{L}+" : "\\b\(number)\\b"
+                let regex = try? NSRegularExpression(pattern: pattern)
+                outer: for (t, title) in titles.enumerated() {
+                    let range = NSRange(title.startIndex..., in: title)
+                    if let match = regex?.firstMatch(in: title, range: range),
+                       let found = Range(match.range, in: title) {
+                        display = String(title[found])
+                        if t == 0 { position = self.words(in: title[..<found.lowerBound]).count }
+                        break outer
+                    }
+                }
+            } else if token.contains(" ") {
                 // Phrase tokens are stemmed word by word, so find the run of
                 // title words with the same stems and show it as written
                 // ("златн лъв" is recovered as „Златен лъв“).
@@ -685,8 +945,8 @@ enum TopicGrouper {
                     }
                 }
             }
-            picks.append(Pick(token: token, display: display ?? token.capitalized, isPhrase: token.contains(" "),
-                              isQuoted: quotedTokens.contains(token),
+            picks.append(Pick(token: token, display: display ?? token.capitalized, isPhrase: token.contains(" ") || token.hasPrefix("#"),
+                              isQuoted: quotedTokens.contains(token) && !token.hasPrefix("#"),
                               isProper: proper, order: order, position: position, words: words))
         }
         // A capitalised word that opens the newest title right before a

@@ -17,9 +17,12 @@ struct TopicGrouperTests {
         #expect(t.quoted.contains("златн лъв"))
         // components stay in the set, as with English named entities
         #expect(t.tokens.contains("unknown"))
-        // the sentence-initial Cyrillic word never starts a name run
+        // the sentence-initial Cyrillic word opens a run only with a
+        // capitalised word right after it; alone it is just the sentence start
         let lead = TopicGrouper.tokens("Матилд Арсел спечели купа")
-        #expect(!lead.names.contains("матилд арсел"))
+        #expect(lead.names.contains("матилд арсел"))
+        let plain = TopicGrouper.tokens("Депутатите приеха закон за Марица Изток")
+        #expect(plain.names == ["мариц изток"])
         let mid = TopicGrouper.tokens("Актрисата Матилд Арсел спечели купа")
         #expect(mid.names.contains("матилд арсел"))
     }
@@ -115,6 +118,77 @@ struct TopicGrouperTests {
         #expect(TopicGrouper.group(capital, sensitivity: 0.5).count == 1)
     }
 
+    @Test @MainActor func parliamentaryBoilerplateDoesNotLink() {
+        // "Депутатите приеха на първо четене" is how every bill is
+        // reported; two unrelated bills share only that.
+        let bills = [
+            article("Депутатите от икономическа комисия приеха на първо четене нов закон за бързите кредити"),
+            article("„Средство за сплашване“ на журналисти. Депутатите приеха на първо четене мерки срещу делата шамари", minutesAgo: 90),
+        ]
+        #expect(TopicGrouper.group(bills, sensitivity: 0.5).count == 2)
+    }
+
+    @Test @MainActor func sharedPreciseAmountLinks() {
+        // Three papers, three namings of the parties (Latin, Cyrillic in
+        // quotes, "български еднорог"): the amount is all they share.
+        let deal = [
+            article("Shelly Group може да бъде продадена на Schneider Electric за 1,2 млрд. евро"),
+            article("Френски технологичен гигант иска да купи български еднорог за 1,2 млрд. евро", minutesAgo: 55),
+            article("Schneider Electric предлага 1.2 млрд. евро за българската \"Шелли груп\"", minutesAgo: 220),
+        ]
+        let groups = TopicGrouper.group(deal, sensitivity: 0.5)
+        #expect(groups.count == 1)
+        #expect(groups.first?.headline == "1,2 млрд")
+        // A bare number is not an amount: 250 mm and 250 square metres
+        // share nothing, and neither do a round figure or a year.
+        let numbers = [
+            article("Volkswagen представи нов ID. Buzz Cargo с 250 мм по-дълго междуосие"),
+            article("Стенопис с лика на Кракра Пернишки върху 250 кв. метра изрисуваха в Перник"),
+        ]
+        #expect(TopicGrouper.group(numbers, sensitivity: 0.5).count == 2)
+        #expect(TopicGrouper.amountToken("1.2", next: "милиарда") == "#1.2 млрд")
+        #expect(TopicGrouper.amountToken("367", next: "млн") == "#367 млн")
+        #expect(TopicGrouper.amountToken("500", next: "хил") == nil)
+        #expect(TopicGrouper.amountToken("2027", next: nil) == nil)
+    }
+
+    @Test @MainActor func namesMatchAcrossScripts() {
+        // Cyrillic and Latin spellings of one name meet on their Latin
+        // key ("sheli grup"), a letter apart for Schneider/Шнайдер.
+        #expect(TopicGrouper.latinKey(["Шелли", "груп"]) == TopicGrouper.latinKey(["Shelly", "Group"]))
+        #expect(TopicGrouper.similarLatin(TopicGrouper.latinKey(["Шнайдер", "Електрик"]),
+                                          TopicGrouper.latinKey(["Schneider", "Electric"])))
+        let deal = [
+            article("Шнайдер Електрик купува Шели Груп за милиарди"),
+            article("Schneider Electric buys Shelly Group in record deal", minutesAgo: 40),
+        ]
+        #expect(TopicGrouper.group(deal, sensitivity: 0.5).count == 1)
+    }
+
+    @Test @MainActor func summaryNamesAreSecondaryEvidence() {
+        func article(_ title: String, _ summary: String, minutesAgo: Int = 0) -> Article {
+            Article(id: UUID().uuidString, feedID: UUID(), sourceTitle: "Dir.bg", title: title, link: nil,
+                    summary: summary, published: Date().addingTimeInterval(-Double(minutesAgo) * 60), fetchedAt: Date())
+        }
+        // Two strong things anywhere make a story: "Schneider Electric"
+        // in both titles and "Шелли груп" / "Shelly Group" across scripts.
+        let deal = [
+            article("Shelly Group може да бъде продадена на Schneider Electric", ""),
+            article("Schneider Electric предлага милиарди за българската \"Шелли груп\"",
+                    "Френската компания ще предложи 70 евро за акция за производителя на устройства за умен дом \"Шелли груп\".", minutesAgo: 30),
+        ]
+        #expect(TopicGrouper.group(deal, sensitivity: 0.5).count == 1)
+        // One name in a summary plus a common title word is not: a match
+        // report's summary names the coach, which ties it to nothing.
+        let cska = [
+            article("ЦСКА отново се развилня с четири гола и излезе на второто място",
+                    "Христо Янев изведе отбора до победа с 4:0 срещу Берое."),
+            article("След спечелването на Суперкупата: Може ли Христо Янев да остане начело на ЦСКА?",
+                    "Треньорът има договор до края на сезона.", minutesAgo: 120),
+        ]
+        #expect(TopicGrouper.group(cska, sensitivity: 0.5).count == 2)
+    }
+
     @Test @MainActor func stemmerFoldsInflections() {
         for (forms, stem) in [
             (["точки", "точка", "точките"], "точк"),
@@ -194,6 +268,8 @@ struct TopicGrouperTests {
         ]
         let groups = TopicGrouper.group(articles, sensitivity: 1)
         #expect(groups.count == 1)
-        #expect(groups.first?.headline == "Асен Василев · Йотова")
+        // "Асен Василев" opens its titles as a two-word run, so it is one
+        // phrase pick; a name and a phrase then take one plain word.
+        #expect(groups.first?.headline == "Асен Василев · Йотова · наркодилър")
     }
 }
