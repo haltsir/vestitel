@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import Combine
 import SwiftUI
+import Network
 
 /// A feed request answered with a bot-protection page (Cloudflare challenge
 /// etc.) instead of feed content.
@@ -99,6 +100,17 @@ final class AppStore: ObservableObject {
     private var notifiedBlockedFeeds: Set<UUID> = []
     /// Last written sync payload (updatedAt zeroed) — skip no-op writes.
     var lastSyncPayload: Data? = nil
+    /// Debounced sync write (see scheduleSyncWrite): when the pending burst
+    /// started, and the timer that will flush it.
+    var syncWriteRequestedAt: Date? = nil
+    var syncWriteTimer: Timer? = nil
+    /// Sync writes are held while offline. Assumed reachable until the
+    /// monitor reports, so an unknown state never holds a write.
+    var networkReachable = true
+    var networkMonitor: NWPathMonitor? = nil
+    /// Vestitel sync files Google Drive parked in its Lost & Found (Settings
+    /// explains them and offers to trash them).
+    @Published var lostAndFoundCopies: [LostAndFoundCopy] = []
 
     // MARK: Updater state (see Updater.swift)
 
@@ -536,6 +548,13 @@ final class AppStore: ObservableObject {
             self?.handleOpenURLs(urls)
         }
         noteVersionChange()
+        startNetworkMonitor()
+        // A pending (debounced) sync write must not die with the process.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.flushSyncWrite() }
+        }
         sweep()
         // Warm the grouping caches (tokens, name tags, embeddings) now, on
         // the loaded inbox: cold they cost over a second for a large inbox,
@@ -1260,7 +1279,7 @@ final class AppStore: ObservableObject {
         if let data = try? encoder.encode(state) {
             try? data.write(to: Self.stateURL, options: .atomic)
         }
-        writeSyncDocument()
+        scheduleSyncWrite()
     }
 
     private func load() {

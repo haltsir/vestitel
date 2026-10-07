@@ -1,10 +1,12 @@
 import Foundation
 import CoreServices
+import Network
 
 /// One machine's contribution to the shared sync folder. Every machine
-/// writes exactly one file (vestitel-<machineID>.json) and merges everyone
-/// else's — no file is ever written by two machines, so dumb folder sync
-/// (Google Drive, iCloud Drive, Syncthing…) can never produce conflicts.
+/// writes exactly one file (vestitel-<machineID>.json.gz; plain .json
+/// before 1.27, still read) and merges everyone else's — no file is ever
+/// written by two machines, so dumb folder sync (Google Drive, iCloud
+/// Drive, Syncthing…) can never produce conflicts.
 struct SyncDocument: Codable {
     var machineID: String
     var machineName: String
@@ -33,7 +35,28 @@ extension AppStore {
         return URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
     }
 
-    private var ownSyncFileName: String { "vestitel-\(machineID).json" }
+    private var ownSyncFileName: String { "vestitel-\(machineID).json.gz" }
+    /// What this machine wrote before 1.27; removed after the first .gz write.
+    private var ownLegacySyncFileName: String { "vestitel-\(machineID).json" }
+
+    nonisolated static func isSyncFileName(_ name: String) -> Bool {
+        name.hasPrefix("vestitel-") && (name.hasSuffix(".json.gz") || name.hasSuffix(".json"))
+    }
+
+    /// Decodes a sync file of either generation: gzip-wrapped (1.27+) or
+    /// plain JSON. nil for torn or foreign content.
+    nonisolated static func decodeSyncDocument(_ data: Data) -> SyncDocument? {
+        let json: Data
+        if Gzip.isGzip(data) {
+            guard let inflated = Gzip.decompress(data) else { return nil }
+            json = inflated
+        } else {
+            json = data
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try? decoder.decode(SyncDocument.self, from: json)
+    }
 
     /// The preference fields that travel between Macs: everything except
     /// the machine-local sync wiring itself.
@@ -49,7 +72,7 @@ extension AppStore {
         return shared
     }
 
-    private static func syncEncoder() -> JSONEncoder {
+    nonisolated static func syncEncoder() -> JSONEncoder {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         // sortedKeys: stable bytes, so "did anything change" is a data compare
@@ -78,20 +101,21 @@ extension AppStore {
         }
         let unreadBefore = unreadCount
 
-        let ownFile = ownSyncFileName
+        let ownFiles: Set<String> = [ownSyncFileName, ownLegacySyncFileName]
         let docs: [SyncDocument]? = await Task.detached(priority: .utility) {
             let fm = FileManager.default
             try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
             guard let names = try? fm.contentsOfDirectory(atPath: folder.path) else { return nil }
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            var docs: [SyncDocument] = []
-            for name in names where name.hasPrefix("vestitel-") && name.hasSuffix(".json") && name != ownFile {
+            // One document per machine: a Mac mid-upgrade has both its old
+            // .json and its new .json.gz for a while; the newer stamp wins.
+            var newest: [String: SyncDocument] = [:]
+            for name in names where Self.isSyncFileName(name) && !ownFiles.contains(name) {
                 guard let data = try? Data(contentsOf: folder.appendingPathComponent(name)),
-                      let doc = try? decoder.decode(SyncDocument.self, from: data) else { continue }
-                docs.append(doc)
+                      let doc = Self.decodeSyncDocument(data) else { continue }
+                if let held = newest[doc.machineID], held.updatedAt >= doc.updatedAt { continue }
+                newest[doc.machineID] = doc
             }
-            return docs
+            return Array(newest.values)
         }.value
 
         guard let docs else {
@@ -106,9 +130,9 @@ extension AppStore {
         if collapseDuplicateReposts() { changed = true }
         adoptRemoteSettings(from: docs)
         if changed {
-            save()   // save() also rewrites our sync document
+            save()   // save() also schedules a rewrite of our sync document
         } else {
-            writeSyncDocument()
+            scheduleSyncWrite()
         }
         // A merge that brought new articles gets the same signals as a fetch
         // that did — unless the popover is open and the user is looking.
@@ -121,6 +145,7 @@ extension AppStore {
         syncStatus = docs.isEmpty
             ? "No other Macs found yet · checked \(time)"
             : "Merged \(docs.count) other Mac\(docs.count == 1 ? "" : "s") · \(time)"
+        checkLostAndFound()
     }
 
     /// Adopt the newest remote preferences (last writer wins) when this
@@ -145,8 +170,69 @@ extension AppStore {
         adoptingSettings = false
     }
 
+    // MARK: Writing our document
+
+    /// Trailing debounce on the sync write: a burst of saves (a merge
+    /// followed by its save, a run of clears while reading) becomes one
+    /// upload instead of several back to back, each of which rewrote the
+    /// file while the cloud client was still uploading the previous one.
+    static let syncWriteDebounce: TimeInterval = 3
+    /// …but never later than this after the first request of a burst.
+    static let syncWriteMaxDelay: TimeInterval = 20
+
+    /// Ask for our document to be rewritten soon. Called from save(), so
+    /// every local mutation propagates within seconds. Nothing is written
+    /// while the Mac is offline: Google Drive, failing to upload a change
+    /// made during an outage, has reverted the file and filed the bytes
+    /// under "Lost & Found" instead of retrying; the pending write flushes
+    /// once the network is back (`networkReachabilityChanged`).
+    func scheduleSyncWrite() {
+        guard syncFolderURL != nil else { return }
+        let now = Date()
+        let first = syncWriteRequestedAt ?? now
+        syncWriteRequestedAt = first
+        syncWriteTimer?.invalidate()
+        let fireAt = min(now.addingTimeInterval(Self.syncWriteDebounce),
+                         first.addingTimeInterval(Self.syncWriteMaxDelay))
+        let timer = Timer(fire: fireAt, interval: 0, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.flushSyncWrite() }
+        }
+        RunLoop.main.add(timer, forMode: .common)   // fires while the popover tracks the mouse too
+        syncWriteTimer = timer
+    }
+
+    /// Perform the pending write now, unless offline (it stays pending).
+    func flushSyncWrite() {
+        syncWriteTimer?.invalidate()
+        syncWriteTimer = nil
+        guard syncWriteRequestedAt != nil, networkReachable else { return }
+        syncWriteRequestedAt = nil
+        writeSyncDocument()
+    }
+
+    func startNetworkMonitor() {
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            let reachable = path.status == .satisfied
+            Task { @MainActor in self?.networkReachabilityChanged(reachable) }
+        }
+        monitor.start(queue: DispatchQueue(label: "vestitel.network-monitor"))
+        networkMonitor = monitor
+    }
+
+    func networkReachabilityChanged(_ reachable: Bool) {
+        guard reachable != networkReachable else { return }
+        networkReachable = reachable
+        if reachable, syncWriteRequestedAt != nil {
+            // a fresh debounce from now: give the cloud client a moment to
+            // reconnect before handing it the file
+            syncWriteRequestedAt = Date()
+            scheduleSyncWrite()
+        }
+    }
+
     /// Write our document if its content changed since the last write.
-    /// Called from save(), so every local mutation propagates promptly.
+    /// Immediate; the debounced entry point is `scheduleSyncWrite`.
     func writeSyncDocument() {
         guard let folder = syncFolderURL else { return }
         // lastFetched/lastError are per-machine fetch status, not shared
@@ -172,16 +258,18 @@ extension AppStore {
         let encoder = Self.syncEncoder()
         guard let payload = try? encoder.encode(doc), payload != lastSyncPayload else { return }
         doc.updatedAt = Date()
-        guard let data = try? encoder.encode(doc) else { return }
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        guard let json = try? encoder.encode(doc), let data = Gzip.compress(json) else { return }
+        let fm = FileManager.default
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
         // Written in place, never atomically: an atomic save is a temp file
         // renamed over the original, which Google Drive sees as delete + new
         // file and, when it catches one mid-upload, files the orphan under
         // "Lost & Found". Only we write this file and readers skip a torn
-        // decode, so in-place is safe.
+        // decode (a gzip member fails its CRC), so in-place is safe.
         do {
             try data.write(to: folder.appendingPathComponent(ownSyncFileName))
             lastSyncPayload = payload
+            try? fm.removeItem(at: folder.appendingPathComponent(ownLegacySyncFileName))
         } catch {
             syncStatus = "Couldn't write to the sync folder."
         }
@@ -196,11 +284,11 @@ extension AppStore {
         syncWatcher = nil
         guard let folder = syncFolderURL else { return }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let ownFile = ownSyncFileName
+        let ownFiles: Set<String> = [ownSyncFileName, ownLegacySyncFileName]
         syncWatcher = FolderWatcher(
             folder: folder,
             latency: 2.0,   // cloud clients write in bursts
-            isRelevant: { name in name.hasPrefix("vestitel-") && name.hasSuffix(".json") && name != ownFile }
+            isRelevant: { name in Self.isSyncFileName(name) && !ownFiles.contains(name) }
         ) { [weak self] in
             Task { @MainActor in await self?.syncNow() }
         }
@@ -209,8 +297,53 @@ extension AppStore {
     /// Remove our file from the sync folder (turning sync off).
     func deleteSyncDocument() {
         guard let folder = syncFolderURL else { return }
-        try? FileManager.default.removeItem(at: folder.appendingPathComponent(ownSyncFileName))
+        syncWriteTimer?.invalidate()
+        syncWriteTimer = nil
+        syncWriteRequestedAt = nil
+        for name in [ownSyncFileName, ownLegacySyncFileName] {
+            try? FileManager.default.removeItem(at: folder.appendingPathComponent(name))
+        }
         lastSyncPayload = nil
+        lostAndFoundCopies = []
+    }
+
+    // MARK: Google Drive's Lost & Found
+
+    /// Where Google Drive for desktop parks a file whose upload it gave up
+    /// on (one account folder per signed-in account). It then repeats a
+    /// "File not synced" notice at every start until the copy is gone,
+    /// which is baffling when the file is one Vestitel rewrites every few
+    /// minutes anyway: the live document has long superseded the copy.
+    static var driveLostAndFoundRoot: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Google/DriveFS/lost_and_found", isDirectory: true)
+    }
+
+    /// Vestitel sync files under `root`, one directory level down.
+    nonisolated static func lostAndFoundCopies(under root: URL) -> [LostAndFoundCopy] {
+        let fm = FileManager.default
+        guard let accounts = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey]) else { return [] }
+        var copies: [LostAndFoundCopy] = []
+        for account in accounts {
+            guard (try? account.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
+                  let files = try? fm.contentsOfDirectory(at: account, includingPropertiesForKeys: [.contentModificationDateKey]) else { continue }
+            for file in files where isSyncFileName(file.lastPathComponent) {
+                let date = (try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                copies.append(LostAndFoundCopy(url: file, date: date))
+            }
+        }
+        return copies.sorted { $0.date > $1.date }
+    }
+
+    func checkLostAndFound() {
+        let copies = Self.lostAndFoundCopies(under: Self.driveLostAndFoundRoot)
+        if copies != lostAndFoundCopies { lostAndFoundCopies = copies }
+    }
+
+    /// Move a stale copy to the Trash (reversible) and re-check.
+    func trashLostAndFoundCopy(_ copy: LostAndFoundCopy) {
+        try? FileManager.default.trashItem(at: copy.url, resultingItemURL: nil)
+        checkLostAndFound()
     }
 
     /// Merge one remote machine's document into local state. Returns true if
@@ -398,6 +531,13 @@ extension AppStore {
 
         return changed
     }
+}
+
+/// A Vestitel sync file Google Drive moved to its Lost & Found.
+struct LostAndFoundCopy: Identifiable, Equatable {
+    let url: URL
+    let date: Date
+    var id: String { url.path }
 }
 
 /// FSEvents watcher on a folder: fires when a file the caller cares about

@@ -452,6 +452,9 @@ struct SettingsView: View {
                                 ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.red))
                     }
                 }
+                ForEach(store.lostAndFoundCopies) { copy in
+                    lostAndFoundRow(copy)
+                }
                 HStack(spacing: 10) {
                     Button {
                         Task { await store.syncNow() }
@@ -495,6 +498,34 @@ struct SettingsView: View {
                 .font(.system(size: 11.5))
                 .foregroundStyle(.tertiary)
         }
+    }
+
+    /// Google Drive parked an old copy of a sync file after an upload failed
+    /// offline, and repeats "File not synced" at every start until the copy
+    /// is gone (see AppStore.checkLostAndFound). Explain it where the user
+    /// will look, and offer the reversible fix.
+    private func lostAndFoundRow(_ copy: LostAndFoundCopy) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Google Drive kept an old copy of a Vestitel sync file from \(copy.date.formatted(date: .abbreviated, time: .omitted)) in its Lost & Found after an upload failed, and repeats its “File not synced” notice until that copy is gone. The live file has long replaced it, so it is safe to move to the Trash.")
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 10) {
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([copy.url])
+                } label: {
+                    Label("Show in Finder", systemImage: "folder")
+                }
+                Button {
+                    store.trashLostAndFoundCopy(copy)
+                } label: {
+                    Label("Move to Trash", systemImage: "trash")
+                }
+            }
+            .buttonStyle(HoverButtonStyle())
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.12)))
     }
 
     private func chooseSyncFolder() {
