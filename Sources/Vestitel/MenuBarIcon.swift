@@ -35,7 +35,22 @@ enum MenuBarIcon {
         make(monochrome: false, phase: Double($0) / Double(frameCount))
     }
 
-    private static func make(monochrome: Bool, phase: Double? = nil, lookDown: Bool = false, grayWaves: Bool = false) -> NSImage {
+    /// The coloured character at any size, eyes up (nothing waiting), for
+    /// places that show it large: the desktop widget's empty state. `frame`
+    /// picks one of the `frameCount` wiggle frames. Rendered once per size
+    /// and frame, then reused.
+    @MainActor private static var mascots: [String: NSImage] = [:]
+    @MainActor static func mascot(pointSize: CGFloat, frame: Int? = nil) -> NSImage {
+        let key = "\(Int(pointSize))-\(frame ?? -1)"
+        if let cached = mascots[key] { return cached }
+        let phase = frame.map { Double($0 % frameCount) / Double(frameCount) }
+        let image = make(monochrome: false, phase: phase, pointSize: pointSize)
+        mascots[key] = image
+        return image
+    }
+
+    private static func make(monochrome: Bool, phase: Double? = nil, lookDown: Bool = false, grayWaves: Bool = false,
+                             pointSize: CGFloat = pointSize) -> NSImage {
         let image = NSImage(size: NSSize(width: pointSize, height: pointSize))
         for scale in [1, 2, 3] {
             let px = Int(pointSize) * scale

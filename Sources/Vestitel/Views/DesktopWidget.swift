@@ -16,6 +16,7 @@ final class DesktopWidgetController {
     static let shared = DesktopWidgetController()
 
     private var panel: NSPanel?
+    private var cardView: NSVisualEffectView?
     private weak var store: AppStore?
     private var cancellables: Set<AnyCancellable> = []
     private var observers: [NSObjectProtocol] = []
@@ -106,11 +107,20 @@ final class DesktopWidgetController {
         effect.layer?.masksToBounds = true
         effect.autoresizingMask = [.width, .height]
 
+        // The content is a sibling of the card, not its subview, so the
+        // card can fade on its own (setDimmed) while the content stays.
+        let container = NSView(frame: effect.frame)
+        container.wantsLayer = true
+        container.layer?.cornerRadius = 18
+        container.layer?.masksToBounds = true
+        container.autoresizingMask = [.width, .height]
         let hosting = NSHostingView(rootView: DesktopWidgetView().environmentObject(store))
         hosting.frame = effect.bounds
         hosting.autoresizingMask = [.width, .height]
-        effect.addSubview(hosting)
-        panel.contentView = effect
+        container.addSubview(effect)
+        container.addSubview(hosting)
+        panel.contentView = container
+        cardView = effect
 
         // Synchronous handlers: setFrame posts didMove before it returns,
         // so `applyingFrame` only covers the notification if it is handled
@@ -150,6 +160,21 @@ final class DesktopWidgetController {
         })
         return panel
     }
+
+    /// The frosted card fades while there is nothing to read, so an empty
+    /// widget is not a large blank rectangle on the wallpaper; the content
+    /// (the mascot and its two lines) keeps its full strength, and the first
+    /// arrival brings the card back.
+    func setDimmed(_ dimmed: Bool) {
+        guard let cardView else { return }
+        let alpha: CGFloat = dimmed ? Self.emptyCardAlpha : 1
+        guard cardView.alphaValue != alpha else { return }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.6
+            cardView.animator().alphaValue = alpha
+        }
+    }
+    private static let emptyCardAlpha: CGFloat = 0.5
 
     /// Called by the grabber on mouse-down, before `performDrag`: moves
     /// until the button is released are the user's and are remembered.
@@ -264,6 +289,7 @@ struct DesktopWidgetView: View {
     /// the ones that arrived since, still wearing the arrival mark.
     @State private var knownIDs: Set<String>? = nil
     @State private var freshIDs: Set<String> = []
+    @State private var hovering = false
 
     private static let maxRows = 60
     /// How long an arrival stays marked before the mark fades.
@@ -273,6 +299,7 @@ struct DesktopWidgetView: View {
         let articles = Array(store.inbox.prefix(Self.maxRows))
         let ids = articles.map(\.id)
         let titleSize = store.settings.desktopWidgetTitleSize
+        let dimmed = articles.isEmpty && !hovering
         VStack(spacing: 0) {
             WindowDragHandle()
                 .frame(height: 22)
@@ -287,15 +314,8 @@ struct DesktopWidgetView: View {
                 let maxOffset = max(0, contentHeight - viewport)
                 Group {
                     if articles.isEmpty {
-                        VStack(spacing: 8) {
-                            Image(systemName: "tray")
-                                .font(.system(size: titleSize * 1.4, weight: .light))
-                            Text("Inbox zero")
-                                .font(.system(size: titleSize * 0.8, weight: .semibold))
-                        }
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity)
-                        .padding(.top, titleSize * 2)
+                        DesktopWidgetEmptyState(titleSize: titleSize)
+                            .frame(width: geo.size.width, height: viewport)
                     } else {
                         VStack(alignment: .leading, spacing: 0) {
                             ForEach(articles) { article in
@@ -341,6 +361,11 @@ struct DesktopWidgetView: View {
         // there when the widget appeared is not. The mark lifts after
         // `freshDuration`, batch by batch.
         .onAppear { knownIDs = Set(ids) }
+        // An empty card recedes into the wallpaper; the first arrival (or
+        // the pointer coming over it) brings it back to full presence.
+        .onHover { hovering = $0 }
+        .onAppear { DesktopWidgetController.shared.setDimmed(dimmed) }
+        .onChange(of: dimmed) { _, now in DesktopWidgetController.shared.setDimmed(now) }
         .onChange(of: ids) { _, now in
             let current = Set(now)
             defer { knownIDs = current }
@@ -352,6 +377,65 @@ struct DesktopWidgetView: View {
                 withAnimation(.easeOut(duration: 1.2)) { freshIDs.subtract(arrived) }
             }
         }
+    }
+}
+
+/// What the widget shows with nothing to read: the mascot, large and looking
+/// up at its waves (the menu bar's "nothing waiting" pose, wiggling while a
+/// refresh runs), a word of credit, and one line that says the app is alive.
+private struct DesktopWidgetEmptyState: View {
+    @EnvironmentObject var store: AppStore
+    let titleSize: Double
+
+    private static let fps = 12.0
+
+    var body: some View {
+        let mascotSize = titleSize * 4
+        VStack(spacing: titleSize * 0.4) {
+            Group {
+                if store.isRefreshing {
+                    TimelineView(.animation(minimumInterval: 1 / Self.fps)) { context in
+                        let frame = Int(context.date.timeIntervalSinceReferenceDate * Self.fps) % MenuBarIcon.frameCount
+                        Image(nsImage: MenuBarIcon.mascot(pointSize: mascotSize, frame: frame))
+                    }
+                } else {
+                    Image(nsImage: MenuBarIcon.mascot(pointSize: mascotSize))
+                }
+            }
+            .frame(width: mascotSize, height: mascotSize)
+            .padding(.bottom, titleSize * 0.2)
+            Text(store.feeds.isEmpty ? "Nothing to listen to yet" : "All caught up")
+                .font(.system(size: titleSize, weight: .bold))
+                .foregroundStyle(.primary)
+            if !status.isEmpty {
+                Text(status)
+                    .font(.system(size: max(13, titleSize * 0.55)))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .multilineTextAlignment(.center)
+        .padding(.horizontal, 22)
+        // a touch above the geometric centre, where an empty card reads balanced
+        .padding(.bottom, titleSize)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var status: String {
+        if store.feeds.isEmpty { return "Add feeds in Settings and they will show up here." }
+        var parts: [String] = []
+        if store.isRefreshing {
+            parts.append("Checking feeds…")
+        } else if let at = store.lastRefresh {
+            parts.append("Last checked \(at.articleDisplay)")
+        }
+        // cleared articles purge after 24 h, so today's count is complete
+        let today = store.cleared.filter { $0.clearedAt.map(Calendar.current.isDateInToday) ?? false }.count
+        if today > 0 { parts.append("\(today) cleared today") }
+        if parts.isEmpty {
+            let n = store.feeds.count
+            parts.append(n == 1 ? "1 source" : "\(n) sources")
+        }
+        return parts.joined(separator: " · ")
     }
 }
 
