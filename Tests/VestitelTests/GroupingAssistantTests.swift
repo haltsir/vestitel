@@ -99,11 +99,69 @@ struct GroupingAssistantTests {
         #expect(grouped.count == 2)
     }
 
+    @Test func reviewPromptNumbersSubjectsThenContext() {
+        let prompt = GroupingAssistant.reviewPrompt(subjects: [stories[0]], context: [stories[1]])
+        #expect(prompt.contains("Groups to review:\nG1 (Бюджет 2027):\n  1. Парламентът прие бюджета [Dir.bg]\n  2. Бюджет 2027 мина на второ четене [Mediapool]"))
+        #expect(prompt.contains("Other recent groups (for merges only):\nG2:\n  1. Левски победи ЦСКА с 2:1 [Sportal]"))
+        let body = try! JSONSerialization.jsonObject(with: GroupingAssistant.reviewRequestBody(subjects: [stories[0]], context: [])) as! [String: Any]
+        #expect((body["system"] as? String)?.hasPrefix("You review story groups") == true)
+    }
+
+    @Test func parseReviewTurnsSplitsIntoExclusionsAndMergesIntoLinks() throws {
+        let subjects = [
+            GroupingAssistant.Story(ids: ["m1", "m2", "m3"], headline: "Мач", members: [("NFL opener", "ESPN"), ("Левски загуби", "Sportal"), ("Левски: първа загуба", "Dir.bg")]),
+            GroupingAssistant.Story(ids: ["b1", "b2"], headline: "Бюджет", members: [("Бюджетът мина", "Dir.bg"), ("Приеха бюджета", "БНР")]),
+        ]
+        let context = [stories[0]]   // G3: s1, s2
+        let answer = """
+        {"splits":[{"group":1,"remove":[1]}, {"group":2,"remove":[1,2]}, {"group":3,"remove":[1]}, {"group":9,"remove":[1]}],
+         "merges":[{"groups":[2,3],"headline":"Бюджет 2027 приет"}, {"groups":[1],"headline":"x"}, {"groups":[3,2],"headline":"dup"}]}
+        """
+        let verdict = try GroupingAssistant.parseReview(response(answer: answer), subjects: subjects, context: context)
+        // G1: member 1 pulled away from the two it was grouped with
+        #expect(verdict.hints.exclusions == [GroupingHints.key("m1", "m2"), GroupingHints.key("m1", "m3")])
+        // G2 removing everyone, G3 (context) and G9 are ignored
+        #expect(verdict.splits == 1)
+        // G2 and G3 become one story: first members linked, all labelled
+        #expect(verdict.hints.links == [GroupingHints.key("b1", "s1")])
+        #expect(verdict.hints.headlines == ["b1": "Бюджет 2027 приет", "b2": "Бюджет 2027 приет", "s1": "Бюджет 2027 приет", "s2": "Бюджет 2027 приет"])
+        #expect(verdict.merges == 1)
+        // the subjects as sent, plus what the split kept
+        #expect(verdict.reviewed == [["m1", "m2", "m3"], ["b1", "b2"], ["m2", "m3"]])
+    }
+
+    @Test func linkAndExclusionForOnePairCannotCoexist() {
+        var hints = GroupingHints()
+        hints.link("a|b")
+        hints.exclude("a|b")
+        #expect(hints.links.isEmpty && hints.exclusions == ["a|b"])
+        hints.link("a|b")
+        #expect(hints.exclusions.isEmpty && hints.links == ["a|b"])
+        var other = GroupingHints(); other.exclude("a|b"); other.headlines["a"] = "h"
+        hints.merge(other)
+        #expect(hints.links.isEmpty && hints.exclusions == ["a|b"] && hints.headlines["a"] == "h")
+    }
+
+    @Test @MainActor func exclusionsKeepTheHeuristicsFromLinkingAPair() {
+        let a = article("y1", "Парламентът прие бюджета за 2027 на второ четене")
+        let b = article("y2", "Парламентът прие бюджета за 2027 на второ четене", minutesAgo: 3)
+        let c = article("y3", "Левски победи ЦСКА", minutesAgo: 9)
+        let plain = TopicGrouper.group([a, b, c], sensitivity: 0.5)
+        #expect(plain.contains { $0.articles.map(\.id).sorted() == ["y1", "y2"] })
+
+        var hints = GroupingHints()
+        hints.exclude(GroupingHints.key("y1", "y2"))
+        let split = TopicGrouper.group([a, b, c], sensitivity: 0.5, hints: hints)
+        #expect(split.allSatisfy { $0.articles.count == 1 })
+    }
+
     @Test func pruneDropsVerdictsAboutGoneArticles() {
         var hints = GroupingHints(links: [GroupingHints.key("a", "b"), GroupingHints.key("b", "c")],
-                                  headlines: ["a": "h", "b": "h", "c": "h"])
-        hints.prune(keeping: ["a", "b"])
+                                  headlines: ["a": "h", "b": "h", "c": "h"],
+                                  exclusions: [GroupingHints.key("a", "c"), GroupingHints.key("b", "a2")])
+        hints.prune(keeping: ["a", "b", "a2"])
         #expect(hints.links == [GroupingHints.key("a", "b")])
+        #expect(hints.exclusions == [GroupingHints.key("b", "a2")])
         #expect(hints.headlines == ["a": "h", "b": "h"])
         #expect(hints.headline(for: ["a", "b", "zz"]) == "h")
         #expect(GroupingHints().headline(for: ["a"]) == nil)

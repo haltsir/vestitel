@@ -276,7 +276,7 @@ struct SettingsView: View {
 
                 SettingRow(
                     title: "Refine groups with Claude",
-                    subtitle: "Sends new headlines to Anthropic's Claude Haiku to catch same-story articles the word matching misses. Optional; needs an Anthropic API key.",
+                    subtitle: "Asks Anthropic's Claude Haiku about new headlines and the groups formed from them: it catches same-story articles the word matching misses and splits groups it got wrong. Optional; needs an Anthropic API key.",
                     onTap: { store.settings.aiGroupingEnabled.toggle() }
                 ) {
                     Toggle("", isOn: $store.settings.aiGroupingEnabled)
@@ -307,7 +307,7 @@ struct SettingsView: View {
             SettingRow(
                 title: "Anthropic API key",
                 subtitle: store.aiStatus.isEmpty
-                    ? "Stored on this Mac only; the other Mac needs its own copy. Runs after every refresh."
+                    ? "Stored on this Mac only; the other Mac needs its own copy. Checks new arrivals after each refresh."
                     : store.aiStatus
             ) {
                 HStack(spacing: 8) {

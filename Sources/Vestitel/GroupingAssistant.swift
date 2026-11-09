@@ -10,6 +10,14 @@ import Foundation
 /// no key, no network or a refused request the grouping is exactly what it
 /// is today.
 ///
+/// A second request per run reviews the groups the heuristics formed
+/// (`runReviewPass`): members that do not belong become exclusions the
+/// heuristics honour, and groups that are one story get linked. A group
+/// is reviewed once per composition (`aiReviewed`, with subsets of a
+/// reviewed group counting as reviewed, so a clear never costs a call);
+/// groups Claude itself formed (every member carries its headline) are
+/// never second-guessed.
+///
 /// Verdicts are remembered per article id (`AppStore.groupingHints`,
 /// `aiAssessed`) and pruned with the articles, so every arrival is asked
 /// about once in its life and the grouping stays stable after the answer.
@@ -75,11 +83,7 @@ enum GroupingAssistant {
         case badResponse
     }
 
-    static let systemPrompt = """
-    You help a news reader cluster headlines that report the same story. You get the reader's \
-    current story groups (G1, G2, …; most hold a single article) and newly arrived articles \
-    (A1, A2, …), mostly Bulgarian and English news.
-
+    static let sameStoryDefinition = """
     Two articles belong together only when they report the same concrete event or development: \
     the same thing happened to the same people or organisations at the same time. The same topic, \
     rubric, sport, competition, politician or ongoing conflict is not enough: different matches of \
@@ -87,16 +91,75 @@ enum GroupingAssistant {
     the same minister on different matters are separate stories. A follow-up to an event (a \
     reaction, a verdict, the next step) is the same story when the headlines clearly refer to that \
     one event. When unsure, keep articles apart.
+    """
+
+    static let headlineRule = """
+    A headline is the story in two to six words, in the language of its articles, sentence case, \
+    no final punctuation, naming the subject (who or what happened), never a generic rubric like \
+    "Политика" or "Sports".
+    """
+
+    static let systemPrompt = """
+    You help a news reader cluster headlines that report the same story. You get the reader's \
+    current story groups (G1, G2, …; most hold a single article) and newly arrived articles \
+    (A1, A2, …), mostly Bulgarian and English news.
+
+    \(sameStoryDefinition)
 
     For each new article that reports a story an existing group already covers, list it under \
     assignments with that group's number. New articles that report the same story as each other \
     and match no existing group form one entry under newGroups. Leave out every article that fits \
     nowhere; most will. Never list an article in both places or twice.
 
-    Give every assignment and new group a headline: the story in two to six words, in the \
-    language of its articles, sentence case, no final punctuation, naming the subject (who or \
-    what happened), never a generic rubric like "Политика" or "Sports".
+    Give every assignment and new group a headline. \(headlineRule)
     """
+
+    static let reviewSystemPrompt = """
+    You review story groups that a news reader's app formed by matching words across headlines, \
+    mostly Bulgarian and English news. Groups to review come first (G1, G2, …), each with \
+    numbered members, newest first; "other recent groups" follow and are only there for merges.
+
+    \(sameStoryDefinition)
+
+    For every group to review that mixes different stories, add a splits entry naming the \
+    members that do not report the same concrete event as the rest. When a group is two stories \
+    of equal size, keep the newest (listed first) and remove the other. A group that is one \
+    story needs no entry. Then, among all listed groups, add a merges entry for each set of \
+    groups that report one and the same story, with a headline for the merged story. \
+    \(headlineRule) When unsure, leave a group as it is and do not merge.
+    """
+
+    static let reviewSchema: [String: Any] = [
+        "type": "object",
+        "properties": [
+            "splits": [
+                "type": "array",
+                "items": [
+                    "type": "object",
+                    "properties": [
+                        "group": ["type": "integer"],
+                        "remove": ["type": "array", "items": ["type": "integer"]],
+                    ],
+                    "required": ["group", "remove"],
+                    "additionalProperties": false,
+                ],
+            ],
+            "merges": [
+                "type": "array",
+                "items": [
+                    "type": "object",
+                    "properties": [
+                        "groups": ["type": "array", "items": ["type": "integer"]],
+                        "headline": ["type": "string"],
+                    ],
+                    "required": ["groups", "headline"],
+                    "additionalProperties": false,
+                ],
+            ],
+        ],
+        "required": ["splits", "merges"],
+        "additionalProperties": false,
+    ]
 
     static let outputSchema: [String: Any] = [
         "type": "object",
@@ -159,51 +222,118 @@ enum GroupingAssistant {
     }
 
     static func requestBody(stories: [Story], arrivals: [Arrival]) -> Data {
+        body(system: systemPrompt, schema: outputSchema, prompt: prompt(stories: stories, arrivals: arrivals))
+    }
+
+    static func reviewRequestBody(subjects: [Story], context: [Story]) -> Data {
+        body(system: reviewSystemPrompt, schema: reviewSchema, prompt: reviewPrompt(subjects: subjects, context: context))
+    }
+
+    private static func body(system: String, schema: [String: Any], prompt: String) -> Data {
         let body: [String: Any] = [
             "model": model,
             "max_tokens": 4096,
-            "system": systemPrompt,
+            "system": system,
             "output_config": [
                 "effort": "low",
-                "format": ["type": "json_schema", "schema": outputSchema],
+                "format": ["type": "json_schema", "schema": schema],
             ],
             "messages": [
-                ["role": "user", "content": prompt(stories: stories, arrivals: arrivals)],
+                ["role": "user", "content": prompt],
             ],
         ]
         return (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
     }
 
-    static func request(apiKey: String, stories: [Story], arrivals: [Arrival]) -> URLRequest {
+    static func request(apiKey: String, body: Data) -> URLRequest {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue(apiVersion, forHTTPHeaderField: "anthropic-version")
         request.setValue("Vestitel", forHTTPHeaderField: "User-Agent")
-        request.httpBody = requestBody(stories: stories, arrivals: arrivals)
+        request.httpBody = body
         request.timeoutInterval = 90
         return request
+    }
+
+    /// The review message: the groups to judge, members numbered within
+    /// each, then the other recent groups (merge candidates only).
+    static func reviewPrompt(subjects: [Story], context: [Story]) -> String {
+        var lines: [String] = []
+        func emit(_ story: Story, number: Int) {
+            var head = "G\(number)"
+            if let headline = story.headline, !headline.isEmpty { head += " (\(headline))" }
+            lines.append(head + ":")
+            for (m, member) in story.members.enumerated() {
+                lines.append("  \(m + 1). \(oneLine(member.title)) [\(member.source)]")
+            }
+        }
+        lines.append("Groups to review:")
+        for (n, story) in subjects.enumerated() { emit(story, number: n + 1) }
+        lines.append("")
+        lines.append("Other recent groups (for merges only):")
+        if context.isEmpty { lines.append("(none)") }
+        for (n, story) in context.enumerated() { emit(story, number: subjects.count + n + 1) }
+        return lines.joined(separator: "\n")
+    }
+
+    struct ReviewVerdict {
+        var hints = GroupingHints()
+        /// Compositions judged (the subjects as sent, and what a split kept).
+        var reviewed: [[String]] = []
+        var splits = 0
+        var merges = 0
+    }
+
+    /// Splits become exclusions between every removed member and every
+    /// kept one; merges link the groups' first members and label all of
+    /// them. Group numbers run over subjects then context, as in the
+    /// prompt; a split may only name a subject.
+    static func parseReview(_ data: Data, subjects: [Story], context: [Story]) throws -> ReviewVerdict {
+        let answer = try answerObject(data)
+        let all = subjects + context
+        var verdict = ReviewVerdict()
+        verdict.reviewed = subjects.map(\.ids)
+
+        for item in answer["splits"] as? [[String: Any]] ?? [] {
+            guard let g = item["group"] as? Int, subjects.indices.contains(g - 1) else { continue }
+            let story = subjects[g - 1]
+            let removed = Set((item["remove"] as? [Int] ?? []).filter { story.ids.indices.contains($0 - 1) }.map { $0 - 1 })
+            let kept = story.ids.indices.filter { !removed.contains($0) }
+            guard !removed.isEmpty, !kept.isEmpty else { continue }
+            for r in removed {
+                for k in kept { verdict.hints.exclude(GroupingHints.key(story.ids[r], story.ids[k])) }
+            }
+            if kept.count > 1 { verdict.reviewed.append(kept.map { story.ids[$0] }) }
+            verdict.splits += 1
+        }
+
+        var merged = Set<Int>()
+        for item in answer["merges"] as? [[String: Any]] ?? [] {
+            var groups: [Int] = []
+            for g in item["groups"] as? [Int] ?? [] where all.indices.contains(g - 1) && !merged.contains(g - 1) && !groups.contains(g - 1) {
+                groups.append(g - 1)
+            }
+            guard groups.count >= 2 else { continue }
+            merged.formUnion(groups)
+            for (x, y) in zip(groups, groups.dropFirst()) {
+                guard let a = all[x].ids.first, let b = all[y].ids.first else { continue }
+                verdict.hints.link(GroupingHints.key(a, b))
+            }
+            if let headline = cleanHeadline(item["headline"]) {
+                for g in groups { for id in all[g].ids { verdict.hints.headlines[id] = headline } }
+            }
+            verdict.merges += 1
+        }
+        return verdict
     }
 
     /// Turns a Messages API response into hints. Indices are 1-based (G1,
     /// A1) as in the prompt; anything out of range, a duplicate, or a
     /// "group" of one is ignored rather than failing the batch.
     static func parse(_ data: Data, stories: [Story], arrivals: [Arrival]) throws -> Verdict {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw AssistError.badResponse
-        }
-        switch json["stop_reason"] as? String {
-        case "refusal": throw AssistError.refused
-        case "max_tokens": throw AssistError.truncated
-        default: break
-        }
-        guard let content = json["content"] as? [[String: Any]],
-              let text = content.first(where: { $0["type"] as? String == "text" })?["text"] as? String,
-              let answer = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else {
-            throw AssistError.badResponse
-        }
-
+        let answer = try answerObject(data)
         var verdict = Verdict()
         verdict.assessed = Set(arrivals.map(\.id))
         var placed = Set<Int>()
@@ -215,7 +345,7 @@ enum GroupingAssistant {
             placed.insert(a - 1)
             let arrival = arrivals[a - 1], story = stories[g - 1]
             guard let anchor = story.ids.first else { continue }
-            verdict.hints.links.insert(GroupingHints.key(arrival.id, anchor))
+            verdict.hints.link(GroupingHints.key(arrival.id, anchor))
             if let headline = cleanHeadline(item["headline"]) {
                 for id in story.ids + [arrival.id] { verdict.hints.headlines[id] = headline }
             }
@@ -230,7 +360,7 @@ enum GroupingAssistant {
             guard members.count >= 2 else { continue }
             placed.formUnion(members)
             for (x, y) in zip(members, members.dropFirst()) {
-                verdict.hints.links.insert(GroupingHints.key(arrivals[x].id, arrivals[y].id))
+                verdict.hints.link(GroupingHints.key(arrivals[x].id, arrivals[y].id))
             }
             if let headline = cleanHeadline(item["headline"]) {
                 for m in members { verdict.hints.headlines[arrivals[m].id] = headline }
@@ -238,6 +368,24 @@ enum GroupingAssistant {
             verdict.formed += 1
         }
         return verdict
+    }
+
+    /// The structured answer inside a Messages response, or why there is none.
+    private static func answerObject(_ data: Data) throws -> [String: Any] {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw AssistError.badResponse
+        }
+        switch json["stop_reason"] as? String {
+        case "refusal": throw AssistError.refused
+        case "max_tokens": throw AssistError.truncated
+        default: break
+        }
+        guard let content = json["content"] as? [[String: Any]],
+              let text = content.first(where: { $0["type"] as? String == "text" })?["text"] as? String,
+              let answer = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else {
+            throw AssistError.badResponse
+        }
+        return answer
     }
 
     /// The API's error message for a non-200 answer, if it sent one.
@@ -327,6 +475,19 @@ extension AppStore {
         }
     }
 
+    /// A status line for a non-200 answer, and whether asking again could
+    /// help (a 400 is ours to fix; the rest is the network's or Anthropic's).
+    private func describeHTTPFailure(_ status: Int, data: Data) -> (message: String, permanent: Bool) {
+        let message = GroupingAssistant.errorMessage(in: data)
+        switch status {
+        case 401: return ("The API key was rejected.", false)
+        case 429: return ("Rate limited; will retry after the next refresh.", false)
+        case 400: return ("Anthropic API: \(message ?? "request rejected").", true)
+        case 500...: return ("Anthropic API unavailable; will retry.", false)
+        default: return ("Anthropic API answered \(status).", false)
+        }
+    }
+
     private func runGroupingAssist(manual: Bool) async {
         var rounds = 0
         var checked = 0, joined = 0, formed = 0
@@ -344,20 +505,13 @@ extension AppStore {
             }
 
             do {
-                let request = GroupingAssistant.request(apiKey: key, stories: stories, arrivals: arrivals)
-                let (data, response) = try await session.data(for: request)
+                let body = GroupingAssistant.requestBody(stories: stories, arrivals: arrivals)
+                let (data, response) = try await session.data(for: GroupingAssistant.request(apiKey: key, body: body))
                 let status = (response as? HTTPURLResponse)?.statusCode ?? 0
                 guard status == 200 else {
-                    let message = GroupingAssistant.errorMessage(in: data)
-                    switch status {
-                    case 401: failure = "The API key was rejected."
-                    case 429: failure = "Rate limited; will retry after the next refresh."
-                    case 400: failure = "Anthropic API: \(message ?? "request rejected")."
-                    case 500...: failure = "Anthropic API unavailable; will retry."
-                    default: failure = "Anthropic API answered \(status)."
-                    }
-                    // a 400 won't get better on retry; everything else will
-                    if status == 400 { aiAssessed.formUnion(batchIDs) }
+                    let (message, permanent) = describeHTTPFailure(status, data: data)
+                    failure = message
+                    if permanent { aiAssessed.formUnion(batchIDs) }
                     break
                 }
                 let verdict = try GroupingAssistant.parse(data, stories: stories, arrivals: arrivals)
@@ -380,17 +534,94 @@ extension AppStore {
             }
             rounds += 1
         }
-        if checked > 0 || failure != nil { save() }
-        if let failure {
-            aiStatus = failure
-        } else if checked > 0 {
-            let stories = joined + formed
-            aiStatus = stories == 0
+        // the heuristic groups, as they stand after the arrivals were placed
+        let review: (reviewed: Int, splits: Int, merges: Int, failure: String?) =
+            failure == nil && !Task.isCancelled ? await runReviewPass() : (0, 0, 0, nil)
+        if checked > 0 || review.reviewed > 0 || failure != nil || review.failure != nil { save() }
+
+        var parts: [String] = []
+        if checked > 0 {
+            parts.append(joined + formed == 0
                 ? "Checked \(checked) new article\(checked == 1 ? "" : "s"), no new stories."
-                : "Checked \(checked) new article\(checked == 1 ? "" : "s"): \(joined) joined a story, \(formed) new."
+                : "Checked \(checked) new article\(checked == 1 ? "" : "s"): \(joined) joined a story, \(formed) new.")
+        }
+        if review.reviewed > 0 {
+            parts.append("Reviewed \(review.reviewed) group\(review.reviewed == 1 ? "" : "s"): \(review.splits) split, \(review.merges) merged.")
+        }
+        if let failure = failure ?? review.failure {
+            aiStatus = failure
+        } else if !parts.isEmpty {
+            aiStatus = parts.joined(separator: " ")
         } else if manual {
             aiStatus = "Everything in the inbox has been checked."
         }
+    }
+
+    /// Sends the multi-member groups the heuristics formed and nobody has
+    /// judged yet, with the other recent groups as merge candidates. One
+    /// request; whatever is left over waits for the next run.
+    private func runReviewPass() async -> (reviewed: Int, splits: Int, merges: Int, failure: String?) {
+        guard let key = aiKey, aiAssistActive, !settings.groupBySource else { return (0, 0, 0, nil) }
+        let cutoff = Date() - GroupingAssistant.window
+        var subjects: [GroupingAssistant.Story] = []
+        var context: [GroupingAssistant.Story] = []
+        for group in groupedInbox where group.articles.count > 1 && group.newest >= cutoff {
+            let ids = group.articles.map(\.id)
+            let story = GroupingAssistant.Story(ids: ids, headline: group.headline,
+                                                members: group.articles.map { ($0.title, $0.sourceTitle) })
+            if isClaudeFormed(ids) || isReviewed(ids) {
+                context.append(story)
+            } else {
+                subjects.append(story)
+            }
+        }
+        guard !subjects.isEmpty else { return (0, 0, 0, nil) }
+        subjects = Array(subjects.prefix(40))
+        context = Array(context.prefix(60))
+
+        do {
+            let body = GroupingAssistant.reviewRequestBody(subjects: subjects, context: context)
+            let (data, response) = try await session.data(for: GroupingAssistant.request(apiKey: key, body: body))
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard status == 200 else {
+                let (message, permanent) = describeHTTPFailure(status, data: data)
+                if permanent { markReviewed(subjects.map(\.ids)) }
+                return (0, 0, 0, message)
+            }
+            let verdict = try GroupingAssistant.parseReview(data, subjects: subjects, context: context)
+            markReviewed(verdict.reviewed)
+            stage(verdict.hints)
+            return (subjects.count, verdict.splits, verdict.merges, nil)
+        } catch GroupingAssistant.AssistError.refused {
+            markReviewed(subjects.map(\.ids))
+            return (0, 0, 0, "Claude declined the group review.")
+        } catch GroupingAssistant.AssistError.truncated, GroupingAssistant.AssistError.badResponse {
+            markReviewed(subjects.map(\.ids))
+            return (0, 0, 0, "Couldn't read Claude's group review.")
+        } catch is CancellationError {
+            return (0, 0, 0, nil)
+        } catch {
+            return (0, 0, 0, "Couldn't reach the Anthropic API.")
+        }
+    }
+
+    /// Every member carries the same assist headline: Claude put this
+    /// story together (or joined it), so it is not second-guessed.
+    private func isClaudeFormed(_ ids: [String]) -> Bool {
+        guard let headline = groupingHints.headline(for: ids) else { return false }
+        return ids.allSatisfy { groupingHints.headlines[$0] == headline }
+    }
+
+    /// Judged already, as this composition or as part of a larger one that
+    /// was found to be one story (a clear shrinks groups; it must not cost
+    /// a request).
+    private func isReviewed(_ ids: [String]) -> Bool {
+        let set = Set(ids)
+        return aiReviewed.contains { $0.count >= set.count && set.isSubset(of: $0) }
+    }
+
+    private func markReviewed(_ compositions: [[String]]) {
+        for ids in compositions where ids.count > 1 { aiReviewed.insert(Set(ids)) }
     }
 
     /// The current groups (the grouping the user sees, hints included) with
@@ -421,11 +652,10 @@ extension AppStore {
     /// Verdicts apply at once unless the inbox is held; then they wait for
     /// the hold to lift (`inboxHoldStart` didSet calls `applyPendingHints`).
     private func stage(_ hints: GroupingHints) {
-        guard !hints.links.isEmpty || !hints.headlines.isEmpty else { return }
+        guard !hints.isEmpty else { return }
         if inboxHoldStart != nil {
             var pending = pendingHints ?? GroupingHints()
-            pending.links.formUnion(hints.links)
-            pending.headlines.merge(hints.headlines) { _, new in new }
+            pending.merge(hints)
             pendingHints = pending
         } else {
             merge(hints)
@@ -440,8 +670,7 @@ extension AppStore {
     }
 
     private func merge(_ hints: GroupingHints) {
-        groupingHints.links.formUnion(hints.links)
-        groupingHints.headlines.merge(hints.headlines) { _, new in new }
+        groupingHints.merge(hints)
         hintsVersion += 1
     }
 
@@ -452,5 +681,9 @@ extension AppStore {
         groupingHints.prune(keeping: present)
         pendingHints?.prune(keeping: present)
         aiAssessed = aiAssessed.intersection(present)
+        aiReviewed = Set(aiReviewed.compactMap { ids in
+            let alive = ids.intersection(present)
+            return alive.count > 1 ? alive : nil
+        })
     }
 }

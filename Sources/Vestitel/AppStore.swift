@@ -66,6 +66,8 @@ final class AppStore: ObservableObject {
     var pendingHints: GroupingHints? = nil
     /// Inbox article ids Claude has been asked about (persisted).
     var aiAssessed: Set<String> = []
+    /// Heuristic group compositions Claude has reviewed (persisted).
+    var aiReviewed: Set<Set<String>> = []
     /// Bumped whenever `groupingHints` changes: part of the grouping cache
     /// key, and a published change so the inbox re-renders.
     @Published var hintsVersion = 0 {
@@ -1282,6 +1284,8 @@ final class AppStore: ObservableObject {
         var aiLinks: [String]?
         var aiHeadlines: [String: String]?
         var aiAssessed: [String]?
+        var aiExclusions: [String]?
+        var aiReviewed: [[String]]?
     }
 
     /// Application Support/Vestitel (also home to the local events drop
@@ -1316,7 +1320,9 @@ final class AppStore: ObservableObject {
             lastUpdateCheck: lastUpdateCheck, lastRunVersion: lastRunVersion,
             aiLinks: groupingHints.links.sorted(),
             aiHeadlines: groupingHints.headlines,
-            aiAssessed: aiAssessed.sorted()
+            aiAssessed: aiAssessed.sorted(),
+            aiExclusions: groupingHints.exclusions.sorted(),
+            aiReviewed: aiReviewed.map { $0.sorted() }.sorted { $0.joined() < $1.joined() }
         )
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -1343,8 +1349,10 @@ final class AppStore: ObservableObject {
         lastUpdateCheck = state.lastUpdateCheck
         lastRunVersion = state.lastRunVersion
         settingsUpdatedAt = state.settingsUpdatedAt
-        groupingHints = GroupingHints(links: Set(state.aiLinks ?? []), headlines: state.aiHeadlines ?? [:])
+        groupingHints = GroupingHints(links: Set(state.aiLinks ?? []), headlines: state.aiHeadlines ?? [:],
+                                      exclusions: Set(state.aiExclusions ?? []))
         aiAssessed = Set(state.aiAssessed ?? [])
+        aiReviewed = Set((state.aiReviewed ?? []).map(Set.init))
         // last: its didSet fires save() → writeSyncDocument(), which must see
         // the fully loaded state (machineID above all). adoptingSettings:
         // loading is not a user edit, so it must not re-stamp settingsUpdatedAt.

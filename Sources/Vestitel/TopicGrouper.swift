@@ -18,10 +18,34 @@ import NaturalLanguage
 struct GroupingHints: Equatable {
     var links: Set<String> = []
     var headlines: [String: String] = [:]
+    /// Pairs the assist's review pass pulled apart: the heuristics never
+    /// link them directly (a third article linked to both can still join
+    /// them; groups are small, so that is accepted rather than solved).
+    var exclusions: Set<String> = []
 
     static func key(_ a: String, _ b: String) -> String {
         a < b ? "\(a)|\(b)" : "\(b)|\(a)"
     }
+
+    /// A link and an exclusion for the same pair cannot both stand: the
+    /// newest verdict wins.
+    mutating func link(_ key: String) {
+        exclusions.remove(key)
+        links.insert(key)
+    }
+
+    mutating func exclude(_ key: String) {
+        links.remove(key)
+        exclusions.insert(key)
+    }
+
+    mutating func merge(_ other: GroupingHints) {
+        for key in other.links { link(key) }
+        for key in other.exclusions { exclude(key) }
+        headlines.merge(other.headlines) { _, new in new }
+    }
+
+    var isEmpty: Bool { links.isEmpty && headlines.isEmpty && exclusions.isEmpty }
 
     /// The headline most members of `ids` carry, nil when none does.
     func headline(for ids: [String]) -> String? {
@@ -35,10 +59,12 @@ struct GroupingHints: Equatable {
 
     /// Drop everything that refers to an id no longer in `present`.
     mutating func prune(keeping present: Set<String>) {
-        links = links.filter { link in
-            let parts = link.split(separator: "|", maxSplits: 1)
+        func alive(_ key: String) -> Bool {
+            let parts = key.split(separator: "|", maxSplits: 1)
             return parts.count == 2 && present.contains(String(parts[0])) && present.contains(String(parts[1]))
         }
+        links = links.filter(alive)
+        exclusions = exclusions.filter(alive)
         headlines = headlines.filter { present.contains($0.key) }
     }
 }
@@ -685,14 +711,26 @@ enum TopicGrouper {
         // one component together with whatever the heuristics link to
         // either. Nothing below is skipped because of them, and with no
         // hints the result is exactly the heuristic grouping.
-        if !hints.links.isEmpty {
+        var excluded = Set<[Int]>()
+        if !hints.links.isEmpty || !hints.exclusions.isEmpty {
             let index = Dictionary(articles.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { a, _ in a })
-            for link in hints.links {
-                let parts = link.split(separator: "|", maxSplits: 1)
+            func pair(_ key: String) -> (Int, Int)? {
+                let parts = key.split(separator: "|", maxSplits: 1)
                 guard parts.count == 2,
-                      let a = index[String(parts[0])], let b = index[String(parts[1])] else { continue }
-                union(a, b)
+                      let a = index[String(parts[0])], let b = index[String(parts[1])] else { return nil }
+                return (a, b)
             }
+            for key in hints.links {
+                if let (a, b) = pair(key) { union(a, b) }
+            }
+            for key in hints.exclusions {
+                if let (a, b) = pair(key) { excluded.insert([min(a, b), max(a, b)]) }
+            }
+        }
+        // the heuristic pass links through this: an excluded pair never
+        // joins directly, whatever the tokens say
+        func link(_ a: Int, _ b: Int) {
+            if excluded.isEmpty || !excluded.contains([min(a, b), max(a, b)]) { union(a, b) }
         }
 
         // Inverted index: a pair can only link with shared weight >= 2, i.e.
@@ -795,7 +833,7 @@ enum TopicGrouper {
                 // 1.8 million cars sold met a city's €1,8 million in damages).
                 let sharedAmount = shared.contains { ti.amounts.contains($0) }
                 if strongCount >= 2 || sharedAmount {
-                    union(i, j)
+                    link(i, j)
                     continue
                 }
                 // One shared word or name is never the same story — it takes
@@ -821,14 +859,14 @@ enum TopicGrouper {
                     names.contains($0) && (postings[$0]?.count ?? 0) <= specificCeiling
                 }
                 if jaccard >= jaccardThreshold || (sharedWeight >= 3 && specific) || sharedName {
-                    union(i, j)
+                    link(i, j)
                     continue
                 }
                 // Embedding link: loose semantic similarity backs up the
                 // shared tokens to catch paraphrased headlines.
                 if let va = vectors[i], let vb = vectors[j],
                    cosineDistance(va, vb) <= distanceThreshold {
-                    union(i, j)
+                    link(i, j)
                 }
             }
         }
