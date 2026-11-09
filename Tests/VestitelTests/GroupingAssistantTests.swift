@@ -50,13 +50,14 @@ struct GroupingAssistantTests {
 
     @Test func parseTurnsAssignmentsAndNewGroupsIntoHints() throws {
         let answer = """
-        {"assignments":[{"article":1,"group":1,"headline":"Бюджет 2027 приет."}],
-         "newGroups":[{"articles":[2,3],"headline":"Schneider купува Shelly"},
-                      {"articles":[4],"headline":"lonely"},
-                      {"articles":[9,2],"headline":"out of range"}]}
+        {"assignments":[{"article":1,"title":"Депутатите гласуваха бюджета","group":1,"groupTitle":"Парламентът прие бюджета","headline":"Бюджет 2027 приет."}],
+         "newGroups":[{"articles":[{"article":2,"title":"Shelly Group продадена"},{"article":3,"title":"Шнайдер Електрик купува"}],"headline":"Schneider купува Shelly"},
+                      {"articles":[{"article":4,"title":"Времето утре"}],"headline":"lonely"},
+                      {"articles":[{"article":9,"title":"x"},{"article":2,"title":"Shelly Group продадена"}],"headline":"out of range"}]}
         """
         let verdict = try GroupingAssistant.parse(response(answer: answer), stories: stories, arrivals: arrivals)
         #expect(verdict.assessed == ["a1", "a2", "a3", "a4"])
+        #expect(verdict.mismatched == 0)
         #expect(verdict.hints.links == [GroupingHints.key("a1", "s1"), GroupingHints.key("a2", "a3")])
         // the whole joined story carries the headline, trailing punctuation dropped
         #expect(verdict.hints.headlines["s1"] == "Бюджет 2027 приет")
@@ -114,10 +115,16 @@ struct GroupingAssistantTests {
         ]
         let context = [stories[0]]   // G3: s1, s2
         let answer = """
-        {"splits":[{"group":1,"remove":[1]}, {"group":2,"remove":[1,2]}, {"group":3,"remove":[1]}, {"group":9,"remove":[1]}],
-         "merges":[{"groups":[2,3],"headline":"Бюджет 2027 приет"}, {"groups":[1],"headline":"x"}, {"groups":[3,2],"headline":"dup"}]}
+        {"splits":[{"group":1,"title":"NFL opener","remove":[{"member":1,"title":"NFL opener"}]},
+                   {"group":2,"title":"Бюджетът мина","remove":[{"member":1,"title":"Бюджетът мина"},{"member":2,"title":"Приеха бюджета"}]},
+                   {"group":3,"title":"Парламентът прие бюджета","remove":[{"member":1,"title":"Парламентът прие бюджета"}]},
+                   {"group":9,"title":"x","remove":[{"member":1,"title":"x"}]}],
+         "merges":[{"groups":[{"group":2,"title":"Бюджетът мина"},{"group":3,"title":"Парламентът прие"}],"headline":"Бюджет 2027 приет"},
+                   {"groups":[{"group":1,"title":"NFL opener"}],"headline":"x"},
+                   {"groups":[{"group":3,"title":"Парламентът прие"},{"group":2,"title":"Бюджетът мина"}],"headline":"dup"}]}
         """
         let verdict = try GroupingAssistant.parseReview(response(answer: answer), subjects: subjects, context: context)
+        #expect(verdict.mismatched == 0)
         // G1: member 1 pulled away from the two it was grouped with
         #expect(verdict.hints.exclusions == [GroupingHints.key("m1", "m2"), GroupingHints.key("m1", "m3")])
         // G2 removing everyone, G3 (context) and G9 are ignored
@@ -128,6 +135,41 @@ struct GroupingAssistantTests {
         #expect(verdict.merges == 1)
         // the subjects as sent, plus what the split kept
         #expect(verdict.reviewed == [["m1", "m2", "m3"], ["b1", "b2"], ["m2", "m3"]])
+    }
+
+    /// The real case: the headline was about A3 but the number next to it
+    /// said A4, and potatoes met a Volkswagen. The echoed title now catches
+    /// the slip and the verdict is dropped, not applied.
+    @Test func mismatchedTitleEchoDropsTheVerdict() throws {
+        let answer = """
+        {"assignments":[{"article":2,"title":"Депутатите гласуваха бюджета","group":1,"groupTitle":"Парламентът прие","headline":"wrong article number"},
+                        {"article":1,"title":"Депутатите гласуваха","group":2,"groupTitle":"Парламентът прие","headline":"wrong group number"}],
+         "newGroups":[{"articles":[{"article":3,"title":"Шнайдер Електрик купува"},{"article":4,"title":"Shelly Group продадена"}],"headline":"Schneider купува Shelly"}]}
+        """
+        let verdict = try GroupingAssistant.parse(response(answer: answer), stories: stories, arrivals: arrivals)
+        #expect(verdict.hints.isEmpty)
+        #expect(verdict.joined == 0 && verdict.formed == 0)
+        #expect(verdict.mismatched == 3)
+        #expect(verdict.assessed == ["a1", "a2", "a3", "a4"])
+
+        let review = """
+        {"splits":[{"group":1,"title":"Парламентът прие","remove":[{"member":2,"title":"Парламентът прие бюджета"}]}],
+         "merges":[{"groups":[{"group":1,"title":"Парламентът прие"},{"group":2,"title":"Парламентът прие"}],"headline":"x"}]}
+        """
+        let reviewed = try GroupingAssistant.parseReview(response(answer: review), subjects: [stories[0]], context: [stories[1]])
+        #expect(reviewed.hints.isEmpty && reviewed.splits == 0 && reviewed.merges == 0)
+        #expect(reviewed.mismatched == 2)
+        #expect(reviewed.reviewed == [["s1", "s2"]])
+    }
+
+    @Test func echoMatchesOnWordsOnly() {
+        #expect(GroupingAssistant.echoMatches("„Да, България“ иска", "„Да, България“ иска оставка"))
+        #expect(GroupingAssistant.echoMatches("volkswagen id3 neo", "Volkswagen ID.3 Neo е по-добър"))
+        #expect(GroupingAssistant.echoMatches("Смачкайте картофите с чаша и ги сложете във фурната - резултатът е невероятен", "Смачкайте картофите с чаша и ги сложете във фурната - резултатът е невероятен"))
+        #expect(!GroupingAssistant.echoMatches("Картофите стават хрупкави", "Смачкайте картофите с чаша"))
+        #expect(!GroupingAssistant.echoMatches("", "Anything"))
+        #expect(!GroupingAssistant.echoMatches(nil, "Anything"))
+        #expect(!GroupingAssistant.echoMatches(3, "3 things"))
     }
 
     @Test func linkAndExclusionForOnePairCannotCoexist() {

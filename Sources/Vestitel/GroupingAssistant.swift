@@ -25,6 +25,14 @@ import Foundation
 /// tab) waits in `pendingHints`: regrouping under the reader would shift
 /// the list the hold exists to keep still.
 ///
+/// Every number in an answer travels with an echo of the title it names
+/// (`echoRule`, the first words of the article's headline, or of a
+/// group's first member), and a verdict whose echo does not open that
+/// title is dropped (`echoMatches`): at low effort Haiku once wrote the
+/// right headline with one index off by one, and two unrelated articles
+/// with adjacent numbers became "one story". A dropped verdict costs
+/// nothing; a wrong link sticks until the articles purge.
+///
 /// Raw HTTP to the Messages API (there is no Swift SDK): structured output
 /// pins the answer to `outputSchema`, effort is low (this is
 /// classification), and nothing but titles, sources and the first lines
@@ -65,8 +73,10 @@ enum GroupingAssistant {
     struct Story {
         var ids: [String]
         var headline: String?
-        /// (title, source), newest first.
+        /// (title, source), newest first, in the order of `ids`.
         var members: [(title: String, source: String)]
+        /// What an echo of this group must open (`echoRule`).
+        var firstTitle: String { members.first?.title ?? "" }
     }
 
     struct Verdict {
@@ -75,6 +85,8 @@ enum GroupingAssistant {
         var assessed: Set<String> = []
         var joined = 0
         var formed = 0
+        /// Verdicts dropped because the echoed title did not match the number.
+        var mismatched = 0
     }
 
     enum AssistError: Error, Equatable {
@@ -99,6 +111,13 @@ enum GroupingAssistant {
     "Политика" or "Sports".
     """
 
+    static let echoRule = """
+    Next to every number you give, put in "title" the first three words of the headline that \
+    number stands for, copied exactly from the list (for a group, the first three words of its \
+    first listed member). An entry whose words do not match its number is discarded, so check \
+    the number against the words before you write it.
+    """
+
     static let systemPrompt = """
     You help a news reader cluster headlines that report the same story. You get the reader's \
     current story groups (G1, G2, …; most hold a single article) and newly arrived articles \
@@ -110,6 +129,8 @@ enum GroupingAssistant {
     assignments with that group's number. New articles that report the same story as each other \
     and match no existing group form one entry under newGroups. Leave out every article that fits \
     nowhere; most will. Never list an article in both places or twice.
+
+    \(echoRule)
 
     Give every assignment and new group a headline. \(headlineRule)
     """
@@ -127,7 +148,19 @@ enum GroupingAssistant {
     story needs no entry. Then, among all listed groups, add a merges entry for each set of \
     groups that report one and the same story, with a headline for the merged story. \
     \(headlineRule) When unsure, leave a group as it is and do not merge.
+
+    \(echoRule)
     """
+
+    /// A number plus the echoed title it stands for (`echoRule`).
+    private static func numbered(_ key: String) -> [String: Any] {
+        [
+            "type": "object",
+            "properties": [key: ["type": "integer"], "title": ["type": "string"]],
+            "required": [key, "title"],
+            "additionalProperties": false,
+        ]
+    }
 
     static let reviewSchema: [String: Any] = [
         "type": "object",
@@ -138,9 +171,10 @@ enum GroupingAssistant {
                     "type": "object",
                     "properties": [
                         "group": ["type": "integer"],
-                        "remove": ["type": "array", "items": ["type": "integer"]],
+                        "title": ["type": "string"],
+                        "remove": ["type": "array", "items": numbered("member")],
                     ],
-                    "required": ["group", "remove"],
+                    "required": ["group", "title", "remove"],
                     "additionalProperties": false,
                 ],
             ],
@@ -149,7 +183,7 @@ enum GroupingAssistant {
                 "items": [
                     "type": "object",
                     "properties": [
-                        "groups": ["type": "array", "items": ["type": "integer"]],
+                        "groups": ["type": "array", "items": numbered("group")],
                         "headline": ["type": "string"],
                     ],
                     "required": ["groups", "headline"],
@@ -170,10 +204,12 @@ enum GroupingAssistant {
                     "type": "object",
                     "properties": [
                         "article": ["type": "integer"],
+                        "title": ["type": "string"],
                         "group": ["type": "integer"],
+                        "groupTitle": ["type": "string"],
                         "headline": ["type": "string"],
                     ],
-                    "required": ["article", "group", "headline"],
+                    "required": ["article", "title", "group", "groupTitle", "headline"],
                     "additionalProperties": false,
                 ],
             ],
@@ -182,7 +218,7 @@ enum GroupingAssistant {
                 "items": [
                     "type": "object",
                     "properties": [
-                        "articles": ["type": "array", "items": ["type": "integer"]],
+                        "articles": ["type": "array", "items": numbered("article")],
                         "headline": ["type": "string"],
                     ],
                     "required": ["articles", "headline"],
@@ -284,6 +320,7 @@ enum GroupingAssistant {
         var reviewed: [[String]] = []
         var splits = 0
         var merges = 0
+        var mismatched = 0
     }
 
     /// Splits become exclusions between every removed member and every
@@ -295,11 +332,19 @@ enum GroupingAssistant {
         let all = subjects + context
         var verdict = ReviewVerdict()
         verdict.reviewed = subjects.map(\.ids)
+        let subjectTitles = subjects.map(\.firstTitle), allTitles = all.map(\.firstTitle)
 
         for item in answer["splits"] as? [[String: Any]] ?? [] {
-            guard let g = item["group"] as? Int, subjects.indices.contains(g - 1) else { continue }
-            let story = subjects[g - 1]
-            let removed = Set((item["remove"] as? [Int] ?? []).filter { story.ids.indices.contains($0 - 1) }.map { $0 - 1 })
+            guard let g = index(item, key: "group", echo: "title", in: subjectTitles, mismatched: &verdict.mismatched) else { continue }
+            let story = subjects[g]
+            let memberTitles = story.members.map(\.title)
+            var removed = Set<Int>()
+            for entry in item["remove"] as? [[String: Any]] ?? [] {
+                if let m = index(entry, key: "member", echo: "title", in: memberTitles, mismatched: &verdict.mismatched),
+                   story.ids.indices.contains(m) {
+                    removed.insert(m)
+                }
+            }
             let kept = story.ids.indices.filter { !removed.contains($0) }
             guard !removed.isEmpty, !kept.isEmpty else { continue }
             for r in removed {
@@ -312,8 +357,10 @@ enum GroupingAssistant {
         var merged = Set<Int>()
         for item in answer["merges"] as? [[String: Any]] ?? [] {
             var groups: [Int] = []
-            for g in item["groups"] as? [Int] ?? [] where all.indices.contains(g - 1) && !merged.contains(g - 1) && !groups.contains(g - 1) {
-                groups.append(g - 1)
+            for entry in item["groups"] as? [[String: Any]] ?? [] {
+                guard let g = index(entry, key: "group", echo: "title", in: allTitles, mismatched: &verdict.mismatched),
+                      !merged.contains(g), !groups.contains(g) else { continue }
+                groups.append(g)
             }
             guard groups.count >= 2 else { continue }
             merged.formUnion(groups)
@@ -330,20 +377,22 @@ enum GroupingAssistant {
     }
 
     /// Turns a Messages API response into hints. Indices are 1-based (G1,
-    /// A1) as in the prompt; anything out of range, a duplicate, or a
-    /// "group" of one is ignored rather than failing the batch.
+    /// A1) as in the prompt; anything out of range, a duplicate, a number
+    /// whose echoed title does not match, or a "group" of one is ignored
+    /// rather than failing the batch.
     static func parse(_ data: Data, stories: [Story], arrivals: [Arrival]) throws -> Verdict {
         let answer = try answerObject(data)
         var verdict = Verdict()
         verdict.assessed = Set(arrivals.map(\.id))
         var placed = Set<Int>()
+        let arrivalTitles = arrivals.map(\.title), storyTitles = stories.map(\.firstTitle)
 
         for item in answer["assignments"] as? [[String: Any]] ?? [] {
-            guard let a = item["article"] as? Int, let g = item["group"] as? Int,
-                  arrivals.indices.contains(a - 1), stories.indices.contains(g - 1),
-                  !placed.contains(a - 1) else { continue }
-            placed.insert(a - 1)
-            let arrival = arrivals[a - 1], story = stories[g - 1]
+            guard let a = index(item, key: "article", echo: "title", in: arrivalTitles, mismatched: &verdict.mismatched),
+                  let g = index(item, key: "group", echo: "groupTitle", in: storyTitles, mismatched: &verdict.mismatched),
+                  !placed.contains(a) else { continue }
+            placed.insert(a)
+            let arrival = arrivals[a], story = stories[g]
             guard let anchor = story.ids.first else { continue }
             verdict.hints.link(GroupingHints.key(arrival.id, anchor))
             if let headline = cleanHeadline(item["headline"]) {
@@ -354,8 +403,10 @@ enum GroupingAssistant {
 
         for item in answer["newGroups"] as? [[String: Any]] ?? [] {
             var members: [Int] = []
-            for a in item["articles"] as? [Int] ?? [] where arrivals.indices.contains(a - 1) && !placed.contains(a - 1) && !members.contains(a - 1) {
-                members.append(a - 1)
+            for entry in item["articles"] as? [[String: Any]] ?? [] {
+                guard let a = index(entry, key: "article", echo: "title", in: arrivalTitles, mismatched: &verdict.mismatched),
+                      !placed.contains(a), !members.contains(a) else { continue }
+                members.append(a)
             }
             guard members.count >= 2 else { continue }
             placed.formUnion(members)
@@ -394,6 +445,26 @@ enum GroupingAssistant {
               let error = json["error"] as? [String: Any],
               let message = error["message"] as? String else { return nil }
         return message
+    }
+
+    /// The 0-based index the 1-based number under `key` names, provided the
+    /// title echoed under `echo` opens that item's title. Out of range is
+    /// nil; in range but echoing another title is nil and counted.
+    private static func index(_ item: [String: Any], key: String, echo: String, in titles: [String], mismatched: inout Int) -> Int? {
+        guard let n = item[key] as? Int, titles.indices.contains(n - 1) else { return nil }
+        guard echoMatches(item[echo], titles[n - 1]) else { mismatched += 1; return nil }
+        return n - 1
+    }
+
+    /// Letters and digits only, lowercased: the echo need not get quotes,
+    /// dashes or spacing right, only the words.
+    static func echoMatches(_ echo: Any?, _ title: String) -> Bool {
+        func letters(_ s: String) -> String {
+            String(s.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.map(Character.init))
+        }
+        guard let echo = echo as? String else { return false }
+        let key = letters(echo)
+        return !key.isEmpty && letters(title).hasPrefix(key)
     }
 
     private static func cleanHeadline(_ raw: Any?) -> String? {
@@ -490,7 +561,7 @@ extension AppStore {
 
     private func runGroupingAssist(manual: Bool) async {
         var rounds = 0
-        var checked = 0, joined = 0, formed = 0
+        var checked = 0, joined = 0, formed = 0, mismatched = 0
         var failure: String?
         while rounds < 20, let key = aiKey, aiAssistActive, !Task.isCancelled {
             let all = articles.filter { $0.state == .inbox }
@@ -520,6 +591,7 @@ extension AppStore {
                 checked += arrivals.count
                 joined += verdict.joined
                 formed += verdict.formed
+                mismatched += verdict.mismatched
             } catch GroupingAssistant.AssistError.refused {
                 aiAssessed.formUnion(batchIDs)   // asking again changes nothing
                 failure = "Claude declined one batch."
@@ -535,8 +607,8 @@ extension AppStore {
             rounds += 1
         }
         // the heuristic groups, as they stand after the arrivals were placed
-        let review: (reviewed: Int, splits: Int, merges: Int, failure: String?) =
-            failure == nil && !Task.isCancelled ? await runReviewPass() : (0, 0, 0, nil)
+        let review: ReviewOutcome = failure == nil && !Task.isCancelled ? await runReviewPass() : ReviewOutcome()
+        mismatched += review.mismatched
         if checked > 0 || review.reviewed > 0 || failure != nil || review.failure != nil { save() }
 
         var parts: [String] = []
@@ -547,6 +619,9 @@ extension AppStore {
         }
         if review.reviewed > 0 {
             parts.append("Reviewed \(review.reviewed) group\(review.reviewed == 1 ? "" : "s"): \(review.splits) split, \(review.merges) merged.")
+        }
+        if mismatched > 0 {
+            parts.append("\(mismatched) verdict\(mismatched == 1 ? "" : "s") dropped: title did not match.")
         }
         if let failure = failure ?? review.failure {
             aiStatus = failure
@@ -560,8 +635,13 @@ extension AppStore {
     /// Sends the multi-member groups the heuristics formed and nobody has
     /// judged yet, with the other recent groups as merge candidates. One
     /// request; whatever is left over waits for the next run.
-    private func runReviewPass() async -> (reviewed: Int, splits: Int, merges: Int, failure: String?) {
-        guard let key = aiKey, aiAssistActive, !settings.groupBySource else { return (0, 0, 0, nil) }
+    struct ReviewOutcome {
+        var reviewed = 0, splits = 0, merges = 0, mismatched = 0
+        var failure: String?
+    }
+
+    private func runReviewPass() async -> ReviewOutcome {
+        guard let key = aiKey, aiAssistActive, !settings.groupBySource else { return ReviewOutcome() }
         let cutoff = Date() - GroupingAssistant.window
         var subjects: [GroupingAssistant.Story] = []
         var context: [GroupingAssistant.Story] = []
@@ -575,7 +655,7 @@ extension AppStore {
                 subjects.append(story)
             }
         }
-        guard !subjects.isEmpty else { return (0, 0, 0, nil) }
+        guard !subjects.isEmpty else { return ReviewOutcome() }
         subjects = Array(subjects.prefix(40))
         context = Array(context.prefix(60))
 
@@ -586,22 +666,22 @@ extension AppStore {
             guard status == 200 else {
                 let (message, permanent) = describeHTTPFailure(status, data: data)
                 if permanent { markReviewed(subjects.map(\.ids)) }
-                return (0, 0, 0, message)
+                return ReviewOutcome(failure: message)
             }
             let verdict = try GroupingAssistant.parseReview(data, subjects: subjects, context: context)
             markReviewed(verdict.reviewed)
             stage(verdict.hints)
-            return (subjects.count, verdict.splits, verdict.merges, nil)
+            return ReviewOutcome(reviewed: subjects.count, splits: verdict.splits, merges: verdict.merges, mismatched: verdict.mismatched)
         } catch GroupingAssistant.AssistError.refused {
             markReviewed(subjects.map(\.ids))
-            return (0, 0, 0, "Claude declined the group review.")
+            return ReviewOutcome(failure: "Claude declined the group review.")
         } catch GroupingAssistant.AssistError.truncated, GroupingAssistant.AssistError.badResponse {
             markReviewed(subjects.map(\.ids))
-            return (0, 0, 0, "Couldn't read Claude's group review.")
+            return ReviewOutcome(failure: "Couldn't read Claude's group review.")
         } catch is CancellationError {
-            return (0, 0, 0, nil)
+            return ReviewOutcome()
         } catch {
-            return (0, 0, 0, "Couldn't reach the Anthropic API.")
+            return ReviewOutcome(failure: "Couldn't reach the Anthropic API.")
         }
     }
 
