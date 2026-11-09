@@ -12,7 +12,10 @@ import Testing
 @Suite("Grouping replay") struct GroupingReplay {
     @Test func replay() throws {
         guard let path = ProcessInfo.processInfo.environment["VESTITEL_REPLAY"] else { return }
-        struct Snapshot: Decodable { var articles: [Article] }
+        // aiLinks/aiHeadlines: the Claude assist's stored verdicts, replayed
+        // too when present so the output matches what the app shows
+        // (VESTITEL_REPLAY_HINTS=0 replays the heuristics alone).
+        struct Snapshot: Decodable { var articles: [Article]; var aiLinks: [String]?; var aiHeadlines: [String: String]? }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let snapshot = try decoder.decode(Snapshot.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
@@ -23,7 +26,12 @@ import Testing
                 print("TOK \(article.title)\n    tokens=\(t.tokens.sorted()) names=\(t.names.sorted()) anchors=\(t.anchors.sorted())")
             }
         }
-        for group in TopicGrouper.group(inbox, sensitivity: 0.5) where group.articles.count > 1 {
+        var hints = GroupingHints()
+        if ProcessInfo.processInfo.environment["VESTITEL_REPLAY_HINTS"] != "0" {
+            hints = GroupingHints(links: Set(snapshot.aiLinks ?? []), headlines: snapshot.aiHeadlines ?? [:])
+            if !hints.links.isEmpty { print("HINTS \(hints.links.count) links, \(hints.headlines.count) headlines") }
+        }
+        for group in TopicGrouper.group(inbox, sensitivity: 0.5, hints: hints) where group.articles.count > 1 {
             print("=== [\(group.articles.count)] \(group.headline ?? "-")")
             for article in group.articles { print("   - \(article.title)") }
         }

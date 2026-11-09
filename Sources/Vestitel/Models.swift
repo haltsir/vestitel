@@ -253,6 +253,14 @@ struct AppSettings: Codable, Equatable {
     /// User-defined filtered views of the inbox, in display order: the
     /// first ones get subtabs, the rest go into the "More" menu.
     var smartInboxes: [SmartInbox] = []
+    /// Ask Claude Haiku to refine topic groups: after each refresh the new
+    /// arrivals and the recent inbox are sent to Anthropic's API and its
+    /// same-story verdicts become extra links for the grouper (see
+    /// GroupingAssistant.swift). Off by default; needs an API key, which is
+    /// stored per Mac next to the state file and never synced. Per-machine
+    /// like the key: a Mac without a key would otherwise show the toggle on
+    /// and do nothing.
+    var aiGroupingEnabled: Bool = false
 
     init() {}
 
@@ -278,6 +286,7 @@ struct AppSettings: Codable, Equatable {
         autoUpdateEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoUpdateEnabled) ?? true
         mutedKeywords = try c.decodeIfPresent([String].self, forKey: .mutedKeywords) ?? []
         smartInboxes = try c.decodeIfPresent([SmartInbox].self, forKey: .smartInboxes) ?? []
+        aiGroupingEnabled = try c.decodeIfPresent(Bool.self, forKey: .aiGroupingEnabled) ?? false
     }
 
     static let readClearInterval: TimeInterval = 15 * 60       // 15 minutes

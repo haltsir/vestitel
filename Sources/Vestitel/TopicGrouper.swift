@@ -9,6 +9,40 @@ import NaturalLanguage
 ///     headlines; gated on sharing at least one significant token to avoid
 ///     grouping merely same-genre stories.
 /// Linked pairs are merged with union-find.
+/// Same-story verdicts from outside the heuristics (today: the Claude
+/// assist in GroupingAssistant.swift), fed into `TopicGrouper.group` as
+/// extra links. `links` holds sorted id pairs joined by "|"
+/// (`GroupingHints.key`), `headlines` a label per article id: every
+/// member of a story the assist formed carries the same label, so the
+/// group keeps it however its membership shifts afterwards.
+struct GroupingHints: Equatable {
+    var links: Set<String> = []
+    var headlines: [String: String] = [:]
+
+    static func key(_ a: String, _ b: String) -> String {
+        a < b ? "\(a)|\(b)" : "\(b)|\(a)"
+    }
+
+    /// The headline most members of `ids` carry, nil when none does.
+    func headline(for ids: [String]) -> String? {
+        guard !headlines.isEmpty else { return nil }
+        var counts: [String: Int] = [:]
+        for id in ids {
+            if let headline = headlines[id] { counts[headline, default: 0] += 1 }
+        }
+        return counts.max { a, b in a.value < b.value || (a.value == b.value && a.key > b.key) }?.key
+    }
+
+    /// Drop everything that refers to an id no longer in `present`.
+    mutating func prune(keeping present: Set<String>) {
+        links = links.filter { link in
+            let parts = link.split(separator: "|", maxSplits: 1)
+            return parts.count == 2 && present.contains(String(parts[0])) && present.contains(String(parts[1]))
+        }
+        headlines = headlines.filter { present.contains($0.key) }
+    }
+}
+
 enum TopicGrouper {
 
     /// Words too generic to link two stories (words under 3 characters are
@@ -618,7 +652,7 @@ enum TopicGrouper {
         return count
     }
 
-    static func group(_ articles: [Article], sensitivity: Double) -> [TopicGroup] {
+    static func group(_ articles: [Article], sensitivity: Double, hints: GroupingHints = GroupingHints()) -> [TopicGroup] {
         guard articles.count > 1 else {
             return articles.map { singleton($0) }
         }
@@ -644,6 +678,21 @@ enum TopicGrouper {
         func union(_ a: Int, _ b: Int) {
             let ra = find(a), rb = find(b)
             if ra != rb { parent[ra] = rb }
+        }
+
+        // Verdicts from the Claude assist (GroupingAssistant) are links
+        // like any other: two articles it called the same story end up in
+        // one component together with whatever the heuristics link to
+        // either. Nothing below is skipped because of them, and with no
+        // hints the result is exactly the heuristic grouping.
+        if !hints.links.isEmpty {
+            let index = Dictionary(articles.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { a, _ in a })
+            for link in hints.links {
+                let parts = link.split(separator: "|", maxSplits: 1)
+                guard parts.count == 2,
+                      let a = index[String(parts[0])], let b = index[String(parts[1])] else { continue }
+                union(a, b)
+            }
         }
 
         // Inverted index: a pair can only link with shared weight >= 2, i.e.
@@ -795,8 +844,12 @@ enum TopicGrouper {
             if members.count == 1 {
                 return singleton(members[0])
             }
-            let headline = headline(for: indices.map { tokenSets[$0] },
-                                    titles: indices.map { articles[$0].title })
+            // A group the assist formed or joined wears the headline it
+            // wrote (the one most of its members carry); members linked by
+            // the heuristics alone keep the token-derived label.
+            let headline = hints.headline(for: members.map(\.id))
+                ?? headline(for: indices.map { tokenSets[$0] },
+                            titles: indices.map { articles[$0].title })
             return TopicGroup(
                 id: members.map(\.id).sorted().joined(separator: "|"),
                 headline: headline,
@@ -828,8 +881,8 @@ enum TopicGrouper {
     /// clusters are connected components of the link graph, so losing a
     /// member can only split its own component). Same output shape as
     /// `group`, sorted newest first.
-    static func regroup(_ members: [Article], sensitivity: Double) -> [TopicGroup] {
-        group(members, sensitivity: sensitivity)
+    static func regroup(_ members: [Article], sensitivity: Double, hints: GroupingHints = GroupingHints()) -> [TopicGroup] {
+        group(members, sensitivity: sensitivity, hints: hints)
     }
 
     /// Human-readable label for a group: the tokens shared by most member

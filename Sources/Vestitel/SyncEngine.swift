@@ -69,6 +69,8 @@ extension AppStore {
         shared.desktopWidgetTitleSize = 32
         shared.desktopWidgetFrame = nil
         shared.desktopWidgetScreen = nil
+        // the Claude grouping assist needs a key this Mac holds
+        shared.aiGroupingEnabled = false
         return shared
     }
 

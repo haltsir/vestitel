@@ -14,6 +14,7 @@ struct SettingsView: View {
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var launchAtLoginError: String?
     @State private var newMutedKeyword = ""
+    @State private var aiKeyDraft = ""
     /// The smart inbox being edited (nil = editor closed); `smartInboxIsNew`
     /// decides whether Save appends or replaces.
     @State private var editingSmartInbox: SmartInbox? = nil
@@ -272,6 +273,20 @@ struct SettingsView: View {
                     .labelsHidden()
                     .frame(width: 190)
                 }
+
+                SettingRow(
+                    title: "Refine groups with Claude",
+                    subtitle: "Sends new headlines to Anthropic's Claude Haiku to catch same-story articles the word matching misses. Optional; needs an Anthropic API key.",
+                    onTap: { store.settings.aiGroupingEnabled.toggle() }
+                ) {
+                    Toggle("", isOn: $store.settings.aiGroupingEnabled)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
+
+                if store.settings.aiGroupingEnabled {
+                    aiKeyRow
+                }
             }
 
             Label(
@@ -281,6 +296,48 @@ struct SettingsView: View {
             .font(.system(size: 11.5))
             .foregroundStyle(.tertiary)
         }
+    }
+
+    /// Key entry while none is stored; status plus Run Now / Remove Key
+    /// once one is. The key lives in its own file on this Mac (see
+    /// AppStore.aiKeyURL), never in state.json, exports or the sync folder.
+    @ViewBuilder
+    private var aiKeyRow: some View {
+        if store.aiKeyPresent {
+            SettingRow(
+                title: "Anthropic API key",
+                subtitle: store.aiStatus.isEmpty
+                    ? "Stored on this Mac only; the other Mac needs its own copy. Runs after every refresh."
+                    : store.aiStatus
+            ) {
+                HStack(spacing: 8) {
+                    Button("Run Now") { store.scheduleGroupingAssist(manual: true) }
+                        .disabled(store.aiTask != nil)
+                    Button("Remove Key") { store.removeAIKey() }
+                }
+                .buttonStyle(HoverButtonStyle())
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    SecureField("Paste your Anthropic API key (sk-ant-…)", text: $aiKeyDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit(saveAIKey)
+                    Button("Save", action: saveAIKey)
+                        .buttonStyle(HoverButtonStyle(prominent: true))
+                        .disabled(aiKeyDraft.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                Text("Create one at platform.claude.com under Settings › API keys. Only titles, sources and the first lines of summaries are sent; the key stays on this Mac.")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func saveAIKey() {
+        store.setAIKey(aiKeyDraft)
+        aiKeyDraft = ""
     }
 
     private var widgetTitleSize: Binding<Int> {

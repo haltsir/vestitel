@@ -44,9 +44,32 @@ final class AppStore: ObservableObject {
                Self.syncableSettings(settings) != Self.syncableSettings(oldValue) {
                 settingsUpdatedAt = Date()
             }
+            // a user flip, not the load (refreshAll runs the assist at launch)
+            if !adoptingSettings, settings.aiGroupingEnabled != oldValue.aiGroupingEnabled {
+                if settings.aiGroupingEnabled { scheduleGroupingAssist(manual: true) } else { aiTask?.cancel() }
+            }
             save()
             updateSyncFolderWatcher()
         }
+    }
+
+    // MARK: Claude grouping assist (GroupingAssistant.swift)
+
+    /// The Anthropic API key, read from its own file at launch; nil = no key.
+    var aiKey: String? = nil
+    /// What the last run did, or why it failed; shown under the toggle.
+    @Published var aiStatus = ""
+    var aiTask: Task<Void, Never>? = nil
+    /// Every same-story verdict so far (persisted, pruned with the articles).
+    var groupingHints = GroupingHints()
+    /// Verdicts that arrived while the inbox was held; applied when it lifts.
+    var pendingHints: GroupingHints? = nil
+    /// Inbox article ids Claude has been asked about (persisted).
+    var aiAssessed: Set<String> = []
+    /// Bumped whenever `groupingHints` changes: part of the grouping cache
+    /// key, and a published change so the inbox re-renders.
+    @Published var hintsVersion = 0 {
+        didSet { groupCache = nil }
     }
     @Published var isRefreshing = false
     /// Feeds being fetched by the per-feed refresh button (row spinners).
@@ -147,7 +170,10 @@ final class AppStore: ObservableObject {
     /// ends (popover closed / tab left — then everything flows in).
     /// In-memory only: a restart shows everything, which is correct.
     @Published var inboxHoldStart: Date? = nil {
-        didSet { inboxCache = nil }
+        didSet {
+            inboxCache = nil
+            applyPendingHints()
+        }
     }
 
     private func isHeld(_ article: Article) -> Bool {
@@ -449,7 +475,7 @@ final class AppStore: ObservableObject {
     /// every title (slow), so it only happens when the inbox composition or
     /// sensitivity changes — not on every render/tab switch. The cache holds
     /// ids, not Article values, so read/cleared state is always current.
-    private var groupCache: (key: Int, sensitivity: Double, ids: Set<String>,
+    private var groupCache: (key: Int, sensitivity: Double, hints: Int, ids: Set<String>,
                              structure: [(headline: String?, ids: [String])])?
 
     var groupedInbox: [TopicGroup] {
@@ -459,9 +485,13 @@ final class AppStore: ObservableObject {
             return inbox.map { TopicGroup(id: $0.id, headline: nil, articles: [$0]) }
         }
 
+        // the assist's verdicts are part of the grouping: -1 while it is off
+        let hintsKey = settings.aiGroupingEnabled ? hintsVersion : -1
+        let hints = activeHints
         var hasher = Hasher()
         for article in inbox { hasher.combine(article.id) }
         hasher.combine(settings.groupingSensitivity)
+        hasher.combine(hintsKey)
         let key = hasher.finalize()
 
         let byID = Dictionary(inbox.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
@@ -470,7 +500,8 @@ final class AppStore: ObservableObject {
         var structure: [(headline: String?, ids: [String])]
         if let cache = groupCache, cache.key == key {
             structure = cache.structure
-        } else if let cache = groupCache, cache.sensitivity == sensitivity, ids.isSubset(of: cache.ids) {
+        } else if let cache = groupCache, cache.sensitivity == sensitivity, cache.hints == hintsKey,
+                  ids.isSubset(of: cache.ids) {
             // Only removals since the last grouping (a clear, a read
             // countdown, a hold release never removes). Groups are connected
             // components, so a removal can only split the group it left:
@@ -484,7 +515,7 @@ final class AppStore: ObservableObject {
                     structure.append(entry)
                 } else if survivors.count > 1 {
                     let members = survivors.compactMap { byID[$0] }
-                    for group in TopicGrouper.regroup(members, sensitivity: sensitivity) {
+                    for group in TopicGrouper.regroup(members, sensitivity: sensitivity, hints: hints) {
                         structure.append((group.headline, group.articles.map(\.id)))
                     }
                 } else if let only = survivors.first {
@@ -496,11 +527,11 @@ final class AppStore: ObservableObject {
                 let b = $1.ids.compactMap { byID[$0]?.published }.max() ?? .distantPast
                 return a > b
             }
-            groupCache = (key, sensitivity, ids, structure)
+            groupCache = (key, sensitivity, hintsKey, ids, structure)
         } else {
-            let groups = TopicGrouper.group(inbox, sensitivity: sensitivity)
+            let groups = TopicGrouper.group(inbox, sensitivity: sensitivity, hints: hints)
             structure = groups.map { ($0.headline, $0.articles.map(\.id)) }
-            groupCache = (key, sensitivity, ids, structure)
+            groupCache = (key, sensitivity, hintsKey, ids, structure)
         }
 
         return structure.compactMap { headline, ids in
@@ -539,6 +570,7 @@ final class AppStore: ObservableObject {
 
     init() {
         NotificationManager.shared.setup()
+        aiKey = Self.loadAIKey()
         load()
         // Local sources: files already waiting in the drop folder, then
         // whatever arrives later (folder watcher, vestitel:// URLs).
@@ -815,6 +847,7 @@ final class AppStore: ObservableObject {
             _ = groupedInbox
         }
         await syncNow()
+        scheduleGroupingAssist()
     }
 
     /// Fetch a single feed right now — the per-feed refresh button in
@@ -832,6 +865,7 @@ final class AppStore: ObservableObject {
             _ = groupedInbox
         }
         save()
+        scheduleGroupingAssist()
     }
 
     /// True while the popover is open — the menu bar icon shows its
@@ -1168,7 +1202,10 @@ final class AppStore: ObservableObject {
             $0.state == .cleared &&
             now.timeIntervalSince($0.clearedAt ?? now) >= AppSettings.clearedRetention
         }
-        if articles.count != purgeCount { changed = true }
+        if articles.count != purgeCount {
+            changed = true
+            pruneGroupingHints()
+        }
 
         let seenCount = seen.count
         seen = seen.filter { now.timeIntervalSince($0.value) < AppSettings.seenRetention }
@@ -1241,6 +1278,10 @@ final class AppStore: ObservableObject {
         // updater additions, optional likewise
         var lastUpdateCheck: Date?
         var lastRunVersion: String?
+        // Claude grouping assist, optional likewise
+        var aiLinks: [String]?
+        var aiHeadlines: [String: String]?
+        var aiAssessed: [String]?
     }
 
     /// Application Support/Vestitel (also home to the local events drop
@@ -1272,7 +1313,10 @@ final class AppStore: ObservableObject {
             machineID: machineID, removedFeeds: removedFeeds,
             removedBookmarks: removedBookmarks, archiveClearedAt: archiveClearedAt,
             settingsUpdatedAt: settingsUpdatedAt,
-            lastUpdateCheck: lastUpdateCheck, lastRunVersion: lastRunVersion
+            lastUpdateCheck: lastUpdateCheck, lastRunVersion: lastRunVersion,
+            aiLinks: groupingHints.links.sorted(),
+            aiHeadlines: groupingHints.headlines,
+            aiAssessed: aiAssessed.sorted()
         )
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -1299,6 +1343,8 @@ final class AppStore: ObservableObject {
         lastUpdateCheck = state.lastUpdateCheck
         lastRunVersion = state.lastRunVersion
         settingsUpdatedAt = state.settingsUpdatedAt
+        groupingHints = GroupingHints(links: Set(state.aiLinks ?? []), headlines: state.aiHeadlines ?? [:])
+        aiAssessed = Set(state.aiAssessed ?? [])
         // last: its didSet fires save() → writeSyncDocument(), which must see
         // the fully loaded state (machineID above all). adoptingSettings:
         // loading is not a user edit, so it must not re-stamp settingsUpdatedAt.
