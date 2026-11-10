@@ -22,6 +22,9 @@ struct GroupingHints: Equatable {
     /// link them directly (a third article linked to both can still join
     /// them; groups are small, so that is accepted rather than solved).
     var exclusions: Set<String> = []
+    /// Ids a split took the label away from (they left the story that
+    /// carried it): applied on merge, before new headlines, never stored.
+    var unlabelled: Set<String> = []
 
     static func key(_ a: String, _ b: String) -> String {
         a < b ? "\(a)|\(b)" : "\(b)|\(a)"
@@ -42,10 +45,11 @@ struct GroupingHints: Equatable {
     mutating func merge(_ other: GroupingHints) {
         for key in other.links { link(key) }
         for key in other.exclusions { exclude(key) }
+        for id in other.unlabelled { headlines.removeValue(forKey: id) }
         headlines.merge(other.headlines) { _, new in new }
     }
 
-    var isEmpty: Bool { links.isEmpty && headlines.isEmpty && exclusions.isEmpty }
+    var isEmpty: Bool { links.isEmpty && headlines.isEmpty && exclusions.isEmpty && unlabelled.isEmpty }
 
     /// The headline most members of `ids` carry, nil when none does.
     func headline(for ids: [String]) -> String? {
@@ -66,6 +70,7 @@ struct GroupingHints: Equatable {
         links = links.filter(alive)
         exclusions = exclusions.filter(alive)
         headlines = headlines.filter { present.contains($0.key) }
+        unlabelled = unlabelled.filter(present.contains)
     }
 }
 

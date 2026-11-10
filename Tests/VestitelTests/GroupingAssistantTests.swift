@@ -186,6 +186,11 @@ struct GroupingAssistantTests {
                                              k("t1", "t5"), k("t2", "t5"), k("t3", "t5"), k("t4", "t5")])
         #expect(verdict.hints.links.isEmpty && verdict.splits == 1)
         #expect(verdict.reviewed == [["t1", "t2", "t3", "t4", "t5"], ["t1", "t3"], ["t2", "t4"]])
+        // the first of the two equal stories keeps the label, the rest lose it
+        #expect(verdict.hints.unlabelled == ["t2", "t4", "t5"])
+        var stored = GroupingHints(headlines: ["t1": "x", "t2": "x", "t3": "x", "t4": "x", "t5": "x"])
+        stored.merge(verdict.hints)
+        #expect(stored.headlines == ["t1": "x", "t3": "x"])
 
         // one story holding everyone is no split
         let whole = """

@@ -331,8 +331,10 @@ enum GroupingAssistant {
     }
 
     /// A split is a partition: members in different stories (an unlisted
-    /// member is a story of its own) become exclusions, and each story of
-    /// two or more counts as reviewed. Merges link the groups' first
+    /// member is a story of its own) become exclusions, each story of two
+    /// or more counts as reviewed, and the label stays with the largest
+    /// story only (the Spain train crash wore "Верижната катастрофа на
+    /// Тракия" after leaving that group). Merges link the groups' first
     /// members and label all of them. Group numbers run over subjects
     /// then context, as in the prompt; a split may only name a subject.
     static func parseReview(_ data: Data, subjects: [Story], context: [Story]) throws -> ReviewVerdict {
@@ -367,6 +369,9 @@ enum GroupingAssistant {
             // one story holding everyone is the group as it stands
             guard parts > 1 else { continue }
             for members in listed where members.count > 1 { verdict.reviewed.append(members.map { story.ids[$0] }) }
+            // the label stays with the largest story; everyone else leaves it behind
+            let keeper = listed.indices.max { listed[$0].count < listed[$1].count } ?? 0
+            for m in part.indices where part[m] != keeper { verdict.hints.unlabelled.insert(story.ids[m]) }
             for a in story.ids.indices {
                 for b in story.ids.indices where a < b && part[a] != part[b] {
                     verdict.hints.exclude(GroupingHints.key(story.ids[a], story.ids[b]))
