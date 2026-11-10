@@ -115,19 +115,19 @@ struct GroupingAssistantTests {
         ]
         let context = [stories[0]]   // G3: s1, s2
         let answer = """
-        {"splits":[{"group":1,"title":"NFL opener","remove":[{"member":1,"title":"NFL opener"}]},
-                   {"group":2,"title":"Бюджетът мина","remove":[{"member":1,"title":"Бюджетът мина"},{"member":2,"title":"Приеха бюджета"}]},
-                   {"group":3,"title":"Парламентът прие бюджета","remove":[{"member":1,"title":"Парламентът прие бюджета"}]},
-                   {"group":9,"title":"x","remove":[{"member":1,"title":"x"}]}],
+        {"splits":[{"group":1,"title":"NFL opener","stories":[[{"member":2,"title":"Левски загуби"},{"member":3,"title":"Левски: първа загуба"}]]},
+                   {"group":2,"title":"Бюджетът мина","stories":[[{"member":1,"title":"Бюджетът мина"},{"member":2,"title":"Приеха бюджета"}]]},
+                   {"group":3,"title":"Парламентът прие бюджета","stories":[[{"member":1,"title":"Парламентът прие бюджета"}]]},
+                   {"group":9,"title":"x","stories":[[{"member":1,"title":"x"}]]}],
          "merges":[{"groups":[{"group":2,"title":"Бюджетът мина"},{"group":3,"title":"Парламентът прие"}],"headline":"Бюджет 2027 приет"},
                    {"groups":[{"group":1,"title":"NFL opener"}],"headline":"x"},
                    {"groups":[{"group":3,"title":"Парламентът прие"},{"group":2,"title":"Бюджетът мина"}],"headline":"dup"}]}
         """
         let verdict = try GroupingAssistant.parseReview(response(answer: answer), subjects: subjects, context: context)
         #expect(verdict.mismatched == 0)
-        // G1: member 1 pulled away from the two it was grouped with
+        // G1: member 1 unlisted, so it stands apart from the story of 2 and 3
         #expect(verdict.hints.exclusions == [GroupingHints.key("m1", "m2"), GroupingHints.key("m1", "m3")])
-        // G2 removing everyone, G3 (context) and G9 are ignored
+        // G2 listing everyone as one story, G3 (context) and G9 are ignored
         #expect(verdict.splits == 1)
         // G2 and G3 become one story: first members linked, all labelled
         #expect(verdict.hints.links == [GroupingHints.key("b1", "s1")])
@@ -153,7 +153,7 @@ struct GroupingAssistantTests {
         #expect(verdict.assessed == ["a1", "a2", "a3", "a4"])
 
         let review = """
-        {"splits":[{"group":1,"title":"Парламентът прие","remove":[{"member":2,"title":"Парламентът прие бюджета"}]}],
+        {"splits":[{"group":1,"title":"Парламентът прие","stories":[[{"member":2,"title":"Парламентът прие бюджета"}]]}],
          "merges":[{"groups":[{"group":1,"title":"Парламентът прие"},{"group":2,"title":"Парламентът прие"}],"headline":"x"}]}
         """
         let reviewed = try GroupingAssistant.parseReview(response(answer: review), subjects: [stories[0]], context: [stories[1]])
@@ -170,6 +170,57 @@ struct GroupingAssistantTests {
         #expect(!GroupingAssistant.echoMatches("", "Anything"))
         #expect(!GroupingAssistant.echoMatches(nil, "Anything"))
         #expect(!GroupingAssistant.echoMatches(3, "3 things"))
+    }
+
+    @Test func splitIsAPartitionOfTheGroup() throws {
+        let subject = GroupingAssistant.Story(ids: ["t1", "t2", "t3", "t4", "t5"], headline: "x",
+                                              members: [("Crash on Trakia", "A"), ("Von der Leyen in Varna", "B"), ("Trakia victims in hospital", "C"), ("Protest against von der Leyen", "D"), ("Spanish minister resigns", "E")])
+        let answer = """
+        {"splits":[{"group":1,"title":"Crash on Trakia","stories":[[{"member":1,"title":"Crash on Trakia"},{"member":3,"title":"Trakia victims"}],[{"member":2,"title":"Von der Leyen"},{"member":4,"title":"Protest against"}]]}],
+         "merges":[]}
+        """
+        let verdict = try GroupingAssistant.parseReview(response(answer: answer), subjects: [subject], context: [])
+        // every pair across stories, the unlisted t5 apart from all
+        let k = GroupingHints.key
+        #expect(verdict.hints.exclusions == [k("t1", "t2"), k("t1", "t4"), k("t3", "t2"), k("t3", "t4"),
+                                             k("t1", "t5"), k("t2", "t5"), k("t3", "t5"), k("t4", "t5")])
+        #expect(verdict.hints.links.isEmpty && verdict.splits == 1)
+        #expect(verdict.reviewed == [["t1", "t2", "t3", "t4", "t5"], ["t1", "t3"], ["t2", "t4"]])
+
+        // one story holding everyone is no split
+        let whole = """
+        {"splits":[{"group":1,"title":"Crash on Trakia","stories":[[{"member":1,"title":"Crash on Trakia"},{"member":2,"title":"Von der Leyen"},{"member":3,"title":"Trakia victims"},{"member":4,"title":"Protest"},{"member":5,"title":"Spanish minister"}]]}],"merges":[]}
+        """
+        let none = try GroupingAssistant.parseReview(response(answer: whole), subjects: [subject], context: [])
+        #expect(none.hints.isEmpty && none.splits == 0)
+    }
+
+    @Test func joiningALabelledStoryKeepsItsLabel() throws {
+        var labelled = stories
+        labelled[0].label = "Бюджет 2027"
+        let answer = """
+        {"assignments":[{"article":1,"title":"Депутатите гласуваха","group":1,"groupTitle":"Парламентът прие","headline":"Депутатите гласуваха"}],"newGroups":[]}
+        """
+        let verdict = try GroupingAssistant.parse(response(answer: answer), stories: labelled, arrivals: arrivals)
+        #expect(verdict.hints.headlines == ["s1": "Бюджет 2027", "s2": "Бюджет 2027", "a1": "Бюджет 2027"])
+    }
+
+    @Test @MainActor func exclusionsHoldBetweenComponentsNotJustPairs() {
+        // a, b, c are word-for-word the same headline: the heuristics link
+        // every pair. Excluding a from c must keep them apart even though
+        // b links to both.
+        let a = article("z1", "Парламентът прие бюджета за 2027 на второ четене")
+        let b = article("z2", "Парламентът прие бюджета за 2027 на второ четене", minutesAgo: 3)
+        let c = article("z3", "Парламентът прие бюджета за 2027 на второ четене", minutesAgo: 6)
+        #expect(TopicGrouper.group([a, b, c], sensitivity: 0.5).count == 1)
+        var hints = GroupingHints()
+        hints.exclude(GroupingHints.key("z1", "z3"))
+        let groups = TopicGrouper.group([a, b, c], sensitivity: 0.5, hints: hints)
+        let together = groups.first { $0.articles.count == 2 }?.articles.map(\.id).sorted()
+        #expect(groups.count == 2 && together == ["z1", "z2"])
+        // an assist link on the excluded pair itself still wins (newest verdict)
+        hints.link(GroupingHints.key("z1", "z3"))
+        #expect(TopicGrouper.group([a, b, c], sensitivity: 0.5, hints: hints).count == 1)
     }
 
     @Test func linkAndExclusionForOnePairCannotCoexist() {

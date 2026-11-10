@@ -254,6 +254,9 @@ enum TopicGrouper {
     /// The name tagger is model-backed and not free; memoize like vectors.
     /// Main-thread only.
     private static var tokenCache: [String: TitleTokens] = [:]
+    /// Debug hook (the replay harness, `VESTITEL_LINKS`): called with both
+    /// titles and the rule that linked them, for every heuristic link.
+    static var trace: ((String, String, String) -> Void)?
 
     static func tokens(_ title: String, summary: String? = nil) -> TitleTokens {
         let cacheKey = summary.map { title + "\u{0}" + $0 } ?? title
@@ -696,6 +699,9 @@ enum TopicGrouper {
         }
 
         var parent = Array(articles.indices)
+        // Per component root, the articles some member is excluded from
+        // (the assist's split verdicts); merged on union.
+        var apart: [Int: Set<Int>] = [:]
         func find(_ x: Int) -> Int {
             var x = x
             while parent[x] != x { parent[x] = parent[parent[x]]; x = parent[x] }
@@ -703,7 +709,9 @@ enum TopicGrouper {
         }
         func union(_ a: Int, _ b: Int) {
             let ra = find(a), rb = find(b)
-            if ra != rb { parent[ra] = rb }
+            guard ra != rb else { return }
+            parent[ra] = rb
+            if let moved = apart.removeValue(forKey: ra) { apart[rb, default: []].formUnion(moved) }
         }
 
         // Verdicts from the Claude assist (GroupingAssistant) are links
@@ -711,7 +719,6 @@ enum TopicGrouper {
         // one component together with whatever the heuristics link to
         // either. Nothing below is skipped because of them, and with no
         // hints the result is exactly the heuristic grouping.
-        var excluded = Set<[Int]>()
         if !hints.links.isEmpty || !hints.exclusions.isEmpty {
             let index = Dictionary(articles.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { a, _ in a })
             func pair(_ key: String) -> (Int, Int)? {
@@ -720,17 +727,25 @@ enum TopicGrouper {
                       let a = index[String(parts[0])], let b = index[String(parts[1])] else { return nil }
                 return (a, b)
             }
+            for key in hints.exclusions {
+                if let (a, b) = pair(key) { apart[a, default: []].insert(b); apart[b, default: []].insert(a) }
+            }
             for key in hints.links {
                 if let (a, b) = pair(key) { union(a, b) }
             }
-            for key in hints.exclusions {
-                if let (a, b) = pair(key) { excluded.insert([min(a, b), max(a, b)]) }
-            }
         }
-        // the heuristic pass links through this: an excluded pair never
-        // joins directly, whatever the tokens say
-        func link(_ a: Int, _ b: Int) {
-            if excluded.isEmpty || !excluded.contains([min(a, b), max(a, b)]) { union(a, b) }
+        // The heuristic pass links through this: two components never
+        // join while any member of one is excluded from any member of the
+        // other, whatever the tokens say. A pair-level check was not
+        // enough: a split verdict pulled the von der Leyen visit out of
+        // the Trakia crash group, and the next arrival about both (Radev
+        // cancelling the visit over the crash) bridged the two back.
+        func link(_ a: Int, _ b: Int, _ why: @autoclosure () -> String) {
+            let ra = find(a), rb = find(b)
+            guard ra != rb else { return }
+            if let kept = apart[ra], kept.contains(where: { find($0) == rb }) { return }
+            trace?(articles[a].title, articles[b].title, why())
+            union(a, b)
         }
 
         // Inverted index: a pair can only link with shared weight >= 2, i.e.
@@ -824,16 +839,22 @@ enum TopicGrouper {
                 // Two of them make a story on their own; one is only the
                 // cast list of a match report or a summary's passing
                 // mention, and never adds to the title rules below.
-                let strongCount = shared.union(contextShared).filter {
-                    ti.amounts.contains($0) || tj.amounts.contains($0) || quoted.contains($0)
-                        || (contextNames.contains($0) && frequency($0) <= specificCeiling)
-                }.count + scriptNames.filter { $0.frequency <= specificCeiling }.count
+                // Strong things both found only in summaries count once:
+                // a party and its leader, named in the second paragraph
+                // of anything the party says, are one thing, not two
+                // (condolences from „Да, България“ met Mirchev's vote).
+                func strong(_ token: String) -> Bool {
+                    ti.amounts.contains(token) || tj.amounts.contains(token) || quoted.contains(token)
+                        || (contextNames.contains(token) && frequency(token) <= specificCeiling)
+                }
+                let strongCount = shared.filter(strong).count + min(1, contextShared.filter(strong).count)
+                    + scriptNames.filter { $0.frequency <= specificCeiling }.count
                 // An amount links alone only when both titles carry it; in
                 // a summary it is one strong thing among others (Škoda's
                 // 1.8 million cars sold met a city's €1,8 million in damages).
                 let sharedAmount = shared.contains { ti.amounts.contains($0) }
                 if strongCount >= 2 || sharedAmount {
-                    link(i, j)
+                    link(i, j, "strong \(shared.union(contextShared).sorted()) scripts \(scriptNames.map(\.token))")
                     continue
                 }
                 // One shared word or name is never the same story — it takes
@@ -859,14 +880,14 @@ enum TopicGrouper {
                     names.contains($0) && (postings[$0]?.count ?? 0) <= specificCeiling
                 }
                 if jaccard >= jaccardThreshold || (sharedWeight >= 3 && specific) || sharedName {
-                    link(i, j)
+                    link(i, j, "tokens \(shared.sorted()) jaccard \((jaccard * 100).rounded() / 100) weight \(sharedWeight) specific \(specific) name \(sharedName)")
                     continue
                 }
                 // Embedding link: loose semantic similarity backs up the
                 // shared tokens to catch paraphrased headlines.
                 if let va = vectors[i], let vb = vectors[j],
                    cosineDistance(va, vb) <= distanceThreshold {
-                    link(i, j)
+                    link(i, j, "embedding \(shared.sorted())")
                 }
             }
         }

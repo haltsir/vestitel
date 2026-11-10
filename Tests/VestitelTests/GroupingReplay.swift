@@ -26,6 +26,11 @@ import Testing
                 print("TOK \(article.title)\n    tokens=\(t.tokens.sorted()) names=\(t.names.sorted()) anchors=\(t.anchors.sorted())")
             }
         }
+        if let needle = ProcessInfo.processInfo.environment["VESTITEL_LINKS"] {
+            TopicGrouper.trace = { a, b, why in
+                if a.contains(needle) || b.contains(needle) { print("LINK \(a)\n  <> \(b)\n     \(why)") }
+            }
+        }
         var hints = GroupingHints()
         if ProcessInfo.processInfo.environment["VESTITEL_REPLAY_HINTS"] != "0" {
             hints = GroupingHints(links: Set(snapshot.aiLinks ?? []), headlines: snapshot.aiHeadlines ?? [:],

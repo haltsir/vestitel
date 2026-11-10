@@ -75,6 +75,11 @@ enum GroupingAssistant {
         var headline: String?
         /// (title, source), newest first, in the order of `ids`.
         var members: [(title: String, source: String)]
+        /// The headline the assist gave this story earlier, if any: an
+        /// arrival joining it adopts that label rather than renaming the
+        /// story after itself ("Телефонна линия за близките" was the
+        /// twelfth article of the Trakia crash, and became its title).
+        var label: String? = nil
         /// What an echo of this group must open (`echoRule`).
         var firstTitle: String { members.first?.title ?? "" }
     }
@@ -142,12 +147,14 @@ enum GroupingAssistant {
 
     \(sameStoryDefinition)
 
-    For every group to review that mixes different stories, add a splits entry naming the \
-    members that do not report the same concrete event as the rest. When a group is two stories \
-    of equal size, keep the newest (listed first) and remove the other. A group that is one \
-    story needs no entry. Then, among all listed groups, add a merges entry for each set of \
-    groups that report one and the same story, with a headline for the merged story. \
-    \(headlineRule) When unsure, leave a group as it is and do not merge.
+    For every group to review that mixes different stories, add a splits entry listing its \
+    stories: each story is the members that report one and the same concrete event, and a \
+    member that shares its event with nobody else in the group is left out (it stands alone). \
+    Follow-ups of one event (reactions, condolences, the toll rising, officials responding, the \
+    next step) belong to that event's story; separate stories means separate events. A group \
+    that is one story needs no entry. Then, among all listed groups, add a merges entry \
+    for each set of groups that report one and the same story, with a headline for the merged \
+    story. \(headlineRule) When unsure, leave a group as it is and do not merge.
 
     \(echoRule)
     """
@@ -172,9 +179,9 @@ enum GroupingAssistant {
                     "properties": [
                         "group": ["type": "integer"],
                         "title": ["type": "string"],
-                        "remove": ["type": "array", "items": numbered("member")],
+                        "stories": ["type": "array", "items": ["type": "array", "items": numbered("member")]],
                     ],
-                    "required": ["group", "title", "remove"],
+                    "required": ["group", "title", "stories"],
                     "additionalProperties": false,
                 ],
             ],
@@ -268,7 +275,7 @@ enum GroupingAssistant {
     private static func body(system: String, schema: [String: Any], prompt: String) -> Data {
         let body: [String: Any] = [
             "model": model,
-            "max_tokens": 4096,
+            "max_tokens": 8192,
             "system": system,
             "output_config": [
                 "effort": "low",
@@ -323,10 +330,11 @@ enum GroupingAssistant {
         var mismatched = 0
     }
 
-    /// Splits become exclusions between every removed member and every
-    /// kept one; merges link the groups' first members and label all of
-    /// them. Group numbers run over subjects then context, as in the
-    /// prompt; a split may only name a subject.
+    /// A split is a partition: members in different stories (an unlisted
+    /// member is a story of its own) become exclusions, and each story of
+    /// two or more counts as reviewed. Merges link the groups' first
+    /// members and label all of them. Group numbers run over subjects
+    /// then context, as in the prompt; a split may only name a subject.
     static func parseReview(_ data: Data, subjects: [Story], context: [Story]) throws -> ReviewVerdict {
         let answer = try answerObject(data)
         let all = subjects + context
@@ -338,19 +346,32 @@ enum GroupingAssistant {
             guard let g = index(item, key: "group", echo: "title", in: subjectTitles, mismatched: &verdict.mismatched) else { continue }
             let story = subjects[g]
             let memberTitles = story.members.map(\.title)
-            var removed = Set<Int>()
-            for entry in item["remove"] as? [[String: Any]] ?? [] {
-                if let m = index(entry, key: "member", echo: "title", in: memberTitles, mismatched: &verdict.mismatched),
-                   story.ids.indices.contains(m) {
-                    removed.insert(m)
+            // story number per member; unlisted members get one each
+            var part = Array(repeating: -1, count: story.ids.count)
+            var listed: [[Int]] = []
+            for list in item["stories"] as? [[[String: Any]]] ?? [] {
+                var members: [Int] = []
+                for entry in list {
+                    if let m = index(entry, key: "member", echo: "title", in: memberTitles, mismatched: &verdict.mismatched),
+                       story.ids.indices.contains(m), part[m] == -1 {
+                        part[m] = listed.count
+                        members.append(m)
+                    }
+                }
+                if !members.isEmpty { listed.append(members) }
+            }
+            // nothing matched: no story to keep, nothing to keep apart
+            guard !listed.isEmpty else { continue }
+            var parts = listed.count
+            for m in part.indices where part[m] == -1 { part[m] = parts; parts += 1 }
+            // one story holding everyone is the group as it stands
+            guard parts > 1 else { continue }
+            for members in listed where members.count > 1 { verdict.reviewed.append(members.map { story.ids[$0] }) }
+            for a in story.ids.indices {
+                for b in story.ids.indices where a < b && part[a] != part[b] {
+                    verdict.hints.exclude(GroupingHints.key(story.ids[a], story.ids[b]))
                 }
             }
-            let kept = story.ids.indices.filter { !removed.contains($0) }
-            guard !removed.isEmpty, !kept.isEmpty else { continue }
-            for r in removed {
-                for k in kept { verdict.hints.exclude(GroupingHints.key(story.ids[r], story.ids[k])) }
-            }
-            if kept.count > 1 { verdict.reviewed.append(kept.map { story.ids[$0] }) }
             verdict.splits += 1
         }
 
@@ -395,7 +416,7 @@ enum GroupingAssistant {
             let arrival = arrivals[a], story = stories[g]
             guard let anchor = story.ids.first else { continue }
             verdict.hints.link(GroupingHints.key(arrival.id, anchor))
-            if let headline = cleanHeadline(item["headline"]) {
+            if let headline = story.label ?? cleanHeadline(item["headline"]) {
                 for id in story.ids + [arrival.id] { verdict.hints.headlines[id] = headline }
             }
             verdict.joined += 1
@@ -718,7 +739,8 @@ extension AppStore {
                 covered.formUnion(members.map(\.id))
                 stories.append(.init(ids: members.map(\.id),
                                      headline: members.count > 1 ? group.headline : nil,
-                                     members: members.map { ($0.title, $0.sourceTitle) }))
+                                     members: members.map { ($0.title, $0.sourceTitle) },
+                                     label: groupingHints.headline(for: members.map(\.id))))
             }
         }
         // held arrivals that are not in this batch, and everything in
