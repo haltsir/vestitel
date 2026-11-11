@@ -576,14 +576,15 @@ final class AppStore: ObservableObject {
     init() {
         NotificationManager.shared.setup()
         aiKey = Self.loadAIKey()
+        load()
+        // the long-run vocabulary; the first run with it seeds the table
+        // with every title on hand (after load(), or there are none)
         if let table = TokenFrequencies.load(from: Self.frequenciesURL) {
             tokenFrequencies = table
         } else {
-            // first run with the table: seed it with every title on hand
             for article in articles { tokenFrequencies.record(TopicGrouper.tokens(article.title).recorded) }
             frequenciesDirty = true
         }
-        load()
         // Local sources: files already waiting in the drop folder, then
         // whatever arrives later (folder watcher, vestitel:// URLs).
         startLocalEventsWatcher()
