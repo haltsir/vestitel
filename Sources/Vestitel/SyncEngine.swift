@@ -465,6 +465,7 @@ extension AppStore {
                     a.filteredBy = keyword
                 }
                 articles.append(a)
+                noteTitle(a.title)
                 localIndexByID[a.id] = articles.count - 1
                 changed = true
             }

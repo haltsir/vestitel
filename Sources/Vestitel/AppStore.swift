@@ -55,6 +55,9 @@ final class AppStore: ObservableObject {
 
     // MARK: Claude grouping assist (GroupingAssistant.swift)
 
+    /// Long-run title vocabulary for the grouper's rarity test (TokenFrequencies.swift).
+    var tokenFrequencies = TokenFrequencies()
+    private var frequenciesDirty = false
     /// The Anthropic API key, read from its own file at launch; nil = no key.
     var aiKey: String? = nil
     /// What the last run did, or why it failed; shown under the toggle.
@@ -517,7 +520,7 @@ final class AppStore: ObservableObject {
                     structure.append(entry)
                 } else if survivors.count > 1 {
                     let members = survivors.compactMap { byID[$0] }
-                    for group in TopicGrouper.regroup(members, sensitivity: sensitivity, hints: hints) {
+                    for group in TopicGrouper.regroup(members, sensitivity: sensitivity, hints: hints, frequencies: tokenFrequencies) {
                         structure.append((group.headline, group.articles.map(\.id)))
                     }
                 } else if let only = survivors.first {
@@ -531,7 +534,7 @@ final class AppStore: ObservableObject {
             }
             groupCache = (key, sensitivity, hintsKey, ids, structure)
         } else {
-            let groups = TopicGrouper.group(inbox, sensitivity: sensitivity, hints: hints)
+            let groups = TopicGrouper.group(inbox, sensitivity: sensitivity, hints: hints, frequencies: tokenFrequencies)
             structure = groups.map { ($0.headline, $0.articles.map(\.id)) }
             groupCache = (key, sensitivity, hintsKey, ids, structure)
         }
@@ -573,6 +576,13 @@ final class AppStore: ObservableObject {
     init() {
         NotificationManager.shared.setup()
         aiKey = Self.loadAIKey()
+        if let table = TokenFrequencies.load(from: Self.frequenciesURL) {
+            tokenFrequencies = table
+        } else {
+            // first run with the table: seed it with every title on hand
+            for article in articles { tokenFrequencies.record(TopicGrouper.tokens(article.title).recorded) }
+            frequenciesDirty = true
+        }
         load()
         // Local sources: files already waiting in the drop folder, then
         // whatever arrives later (folder watcher, vestitel:// URLs).
@@ -587,7 +597,7 @@ final class AppStore: ObservableObject {
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.flushSyncWrite() }
+            MainActor.assumeIsolated { self?.flushSyncWrite(); self?.saveFrequencies() }
         }
         sweep()
         // Warm the grouping caches (tokens, name tags, embeddings) now, on
@@ -957,6 +967,7 @@ final class AppStore: ObservableObject {
                 added += 1
             }
             articles.append(article)
+            noteTitle(article.title)
         }
         return added
     }
@@ -1186,6 +1197,7 @@ final class AppStore: ObservableObject {
     func sweep() {
         let now = Date()
         var changed = false
+        saveFrequencies()
 
         for i in articles.indices {
             // read articles clear themselves after 15 minutes
@@ -1308,6 +1320,25 @@ final class AppStore: ObservableObject {
 
     private static var stateURL: URL {
         stateDirectory.appendingPathComponent("state.json")
+    }
+
+    static var frequenciesURL: URL {
+        stateDirectory.appendingPathComponent("token-frequencies.json")
+    }
+
+    /// Counts a title into the long-run vocabulary (`TokenFrequencies`);
+    /// called for every article that enters `articles`, whatever its state.
+    func noteTitle(_ title: String) {
+        tokenFrequencies.record(TopicGrouper.tokens(title).recorded)
+        frequenciesDirty = true
+    }
+
+    /// Written on the sweep tick and at quit, not on every change: the
+    /// table is large and changes with every ingest.
+    func saveFrequencies() {
+        guard frequenciesDirty else { return }
+        tokenFrequencies.save(to: Self.frequenciesURL)
+        frequenciesDirty = false
     }
 
     func save() {

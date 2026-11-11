@@ -106,6 +106,7 @@ struct GroupingAssistantTests {
         #expect(prompt.contains("Other recent groups (for merges only):\nG2:\n  1. Левски победи ЦСКА с 2:1 [Sportal]"))
         let body = try! JSONSerialization.jsonObject(with: GroupingAssistant.reviewRequestBody(subjects: [stories[0]], context: [])) as! [String: Any]
         #expect((body["system"] as? String)?.hasPrefix("You review story groups") == true)
+        #expect(body["model"] as? String == "claude-sonnet-5-5")
     }
 
     @Test func parseReviewTurnsSplitsIntoExclusionsAndMergesIntoLinks() throws {

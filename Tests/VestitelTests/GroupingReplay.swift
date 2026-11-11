@@ -37,7 +37,14 @@ import Testing
                                   exclusions: Set(snapshot.aiExclusions ?? []))
             if !hints.isEmpty { print("HINTS \(hints.links.count) links, \(hints.exclusions.count) exclusions, \(hints.headlines.count) headlines") }
         }
-        for group in TopicGrouper.group(inbox, sensitivity: 0.5, hints: hints) where group.articles.count > 1 {
+        // VESTITEL_FREQUENCIES=<token-frequencies.json>: the app's long-run
+        // vocabulary, so the rarity test runs as it does in the app
+        var frequencies: TokenFrequencies?
+        if let path = ProcessInfo.processInfo.environment["VESTITEL_FREQUENCIES"] {
+            frequencies = TokenFrequencies.load(from: URL(fileURLWithPath: path))
+            print("FREQUENCIES \(Int(frequencies?.titles ?? 0)) titles, mature: \(frequencies?.isMature ?? false)")
+        }
+        for group in TopicGrouper.group(inbox, sensitivity: 0.5, hints: hints, frequencies: frequencies) where group.articles.count > 1 {
             print("=== [\(group.articles.count)] \(group.headline ?? "-")")
             for article in group.articles { print("   - \(article.title)") }
         }

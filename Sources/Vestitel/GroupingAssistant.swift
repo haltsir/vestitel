@@ -40,6 +40,11 @@ import Foundation
 /// instance at a stand-in endpoint (same response shape).
 enum GroupingAssistant {
     static let model = "claude-haiku-5-5"
+    /// The review pass judges whole groups at once, one request per run,
+    /// and a wrong call there sticks: Sonnet at low effort reads the
+    /// difference between a crash and an ailing bishop that Haiku missed,
+    /// for a few cents a day.
+    static let reviewModel = "claude-sonnet-5-5"
     static let apiVersion = "2026-10-21"
     static let defaultEndpoint = URL(string: "https://api.anthropic.com/v1/messages")!
     /// Arrivals per request; a first run over a large inbox takes several.
@@ -265,14 +270,14 @@ enum GroupingAssistant {
     }
 
     static func requestBody(stories: [Story], arrivals: [Arrival]) -> Data {
-        body(system: systemPrompt, schema: outputSchema, prompt: prompt(stories: stories, arrivals: arrivals))
+        body(model: model, system: systemPrompt, schema: outputSchema, prompt: prompt(stories: stories, arrivals: arrivals))
     }
 
     static func reviewRequestBody(subjects: [Story], context: [Story]) -> Data {
-        body(system: reviewSystemPrompt, schema: reviewSchema, prompt: reviewPrompt(subjects: subjects, context: context))
+        body(model: reviewModel, system: reviewSystemPrompt, schema: reviewSchema, prompt: reviewPrompt(subjects: subjects, context: context))
     }
 
-    private static func body(system: String, schema: [String: Any], prompt: String) -> Data {
+    private static func body(model: String, system: String, schema: [String: Any], prompt: String) -> Data {
         let body: [String: Any] = [
             "model": model,
             "max_tokens": 8192,

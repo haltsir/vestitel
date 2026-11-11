@@ -231,6 +231,8 @@ enum TopicGrouper {
         /// What pins a title to a story beyond its single words: adjacent
         /// word pairs ("руски военни") and single quoted words („Петрохан“).
         var anchors: Set<String> = []
+        /// What the long-run vocabulary counts for this title.
+        var recorded: Set<String> { tokens.union(anchors) }
         /// Precise amounts with a magnitude ("#1.2 млрд"), see amountToken;
         /// also in `quoted`, as is a bare precise number ("#3.75").
         var amounts: Set<String> = []
@@ -690,7 +692,8 @@ enum TopicGrouper {
         return count
     }
 
-    static func group(_ articles: [Article], sensitivity: Double, hints: GroupingHints = GroupingHints()) -> [TopicGroup] {
+    static func group(_ articles: [Article], sensitivity: Double, hints: GroupingHints = GroupingHints(),
+                      frequencies: TokenFrequencies? = nil) -> [TopicGroup] {
         guard articles.count > 1 else {
             return articles.map { singleton($0) }
         }
@@ -782,8 +785,14 @@ enum TopicGrouper {
         // (an adjacent pair like "руски военни", a quoted „Петрохан“).
         // "нов" + "план" + "София" are each in dozens of headlines and
         // scattered through both titles, and chained a company's office
-        // move to the city's transport loan.
+        // move to the city's transport loan. "Few titles" is the long-run
+        // table's call once it has seen enough (TokenFrequencies); until
+        // then it is a count over this inbox, where anything in four
+        // titles of nine hundred passes, "борят" included.
         let specificCeiling = max(3, articles.count / 200)
+        func rare(_ token: String, local: Int) -> Bool {
+            frequencies?.isRare(token) ?? (local <= specificCeiling)
+        }
         var sharedCount: [Int: Int] = [:]
         var quotedHit = Set<Int>()
         for i in articles.indices {
@@ -834,11 +843,11 @@ enum TopicGrouper {
                 }
                 // The same name in two scripts: Latin keys that agree, or
                 // differ by a letter in five ("shnaider" / "shneider").
-                var scriptNames: [(token: String, frequency: Int)] = []
+                var scriptNames: [(token: String, rare: Bool)] = []
                 for (keyA, tokenA) in ti.latin where !shared.contains(tokenA) && !contextShared.contains(tokenA) {
                     for (keyB, tokenB) in tj.latin where !shared.contains(tokenB) && !contextShared.contains(tokenB) && tokenA != tokenB {
                         if keyA == keyB || similarLatin(keyA, keyB) {
-                            scriptNames.append((tokenA, max(frequency(tokenA), frequency(tokenB))))
+                            scriptNames.append((tokenA, rare(tokenA, local: frequency(tokenA)) && rare(tokenB, local: frequency(tokenB))))
                             break
                         }
                     }
@@ -854,10 +863,10 @@ enum TopicGrouper {
                 // (condolences from „Да, България“ met Mirchev's vote).
                 func strong(_ token: String) -> Bool {
                     ti.amounts.contains(token) || tj.amounts.contains(token) || quoted.contains(token)
-                        || (contextNames.contains(token) && frequency(token) <= specificCeiling)
+                        || (contextNames.contains(token) && rare(token, local: frequency(token)))
                 }
                 let strongCount = shared.filter(strong).count + min(1, contextShared.filter(strong).count)
-                    + scriptNames.filter { $0.frequency <= specificCeiling }.count
+                    + scriptNames.filter(\.rare).count
                 // An amount links alone only when both titles carry it; in
                 // a summary it is one strong thing among others (Škoda's
                 // 1.8 million cars sold met a city's €1,8 million in damages).
@@ -877,8 +886,9 @@ enum TopicGrouper {
                     + plainMatches(of: tokenSets[j].quoted, in: tokenSets[i], except: shared)
                 sharedWeight += 2 * plainPhrases
                 let specific = shared.contains {
-                    quoted.contains($0) || names.contains($0) || (postings[$0]?.count ?? 0) <= specificCeiling
-                } || plainPhrases > 0 || !tokenSets[i].anchors.isDisjoint(with: tokenSets[j].anchors)
+                    quoted.contains($0) || names.contains($0) || rare($0, local: postings[$0]?.count ?? 0)
+                } || plainPhrases > 0
+                    || tokenSets[i].anchors.intersection(tokenSets[j].anchors).contains { rare($0, local: 0) }
                 // A shared full name plus one more shared word is the same
                 // story: "Пресли Гербер" + "смъртта" across two obituaries
                 // whose wording otherwise differs too much for Jaccard.
@@ -886,7 +896,7 @@ enum TopicGrouper {
                 // "Лига Европа" names a tournament every match report
                 // carries, and would gather a whole rubric into one group.
                 let sharedName = shared.contains {
-                    names.contains($0) && (postings[$0]?.count ?? 0) <= specificCeiling
+                    names.contains($0) && rare($0, local: postings[$0]?.count ?? 0)
                 }
                 if jaccard >= jaccardThreshold || (sharedWeight >= 3 && specific) || sharedName {
                     link(i, j, "tokens \(shared.sorted()) jaccard \((jaccard * 100).rounded() / 100) weight \(sharedWeight) specific \(specific) name \(sharedName)")
@@ -949,8 +959,9 @@ enum TopicGrouper {
     /// clusters are connected components of the link graph, so losing a
     /// member can only split its own component). Same output shape as
     /// `group`, sorted newest first.
-    static func regroup(_ members: [Article], sensitivity: Double, hints: GroupingHints = GroupingHints()) -> [TopicGroup] {
-        group(members, sensitivity: sensitivity, hints: hints)
+    static func regroup(_ members: [Article], sensitivity: Double, hints: GroupingHints = GroupingHints(),
+                        frequencies: TokenFrequencies? = nil) -> [TopicGroup] {
+        group(members, sensitivity: sensitivity, hints: hints, frequencies: frequencies)
     }
 
     /// Human-readable label for a group: the tokens shared by most member
