@@ -348,6 +348,12 @@ enum GroupingAssistant {
             guard let g = index(item, key: "group", echo: "title", in: subjectTitles, mismatched: &verdict.mismatched) else { continue }
             let story = subjects[g]
             let memberTitles = story.members.map(\.title)
+            // a split with a wrong member number is not this group's verdict:
+            // apply what matched, but ask about the group again next run
+            let mismatchedBefore = verdict.mismatched
+            defer {
+                if verdict.mismatched > mismatchedBefore { verdict.reviewed.removeAll { $0 == story.ids } }
+            }
             // story number per member; unlisted members get one each
             var part = Array(repeating: -1, count: story.ids.count)
             var listed: [[Int]] = []

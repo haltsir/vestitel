@@ -159,7 +159,8 @@ struct GroupingAssistantTests {
         let reviewed = try GroupingAssistant.parseReview(response(answer: review), subjects: [stories[0]], context: [stories[1]])
         #expect(reviewed.hints.isEmpty && reviewed.splits == 0 && reviewed.merges == 0)
         #expect(reviewed.mismatched == 2)
-        #expect(reviewed.reviewed == [["s1", "s2"]])
+        // the split named a wrong member: the group is asked about again
+        #expect(reviewed.reviewed.isEmpty)
     }
 
     @Test func echoMatchesOnWordsOnly() {
