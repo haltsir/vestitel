@@ -509,7 +509,15 @@ enum GroupingAssistant {
               !headline.isEmpty else { return nil }
         while let last = headline.last, ".;:!".contains(last) { headline.removeLast() }
         if headline.count > 80 { headline = String(headline.prefix(80)) }
-        return headline.isEmpty ? nil : headline
+        return isHeadline(headline) ? headline : nil
+    }
+
+    /// The schema makes "headline" required, so a model with nothing to say
+    /// fills it with a placeholder: a literal "x" once named a nine-article
+    /// group and every arrival adopted it. A headline is two words or more
+    /// (`headlineRule`); anything less leaves the heuristic label standing.
+    static func isHeadline(_ text: String) -> Bool {
+        text.split(whereSeparator: \.isWhitespace).filter { $0.contains { $0.isLetter || $0.isNumber } }.count >= 2
     }
 
     private static func oneLine(_ text: String) -> String {
@@ -524,6 +532,74 @@ enum GroupingAssistant {
     }
 }
 
+// MARK: - Request log
+
+/// What was asked and what came back, one JSON object per line in
+/// `grouping-assist.jsonl` next to state.json: a wrong verdict sticks until
+/// its articles purge, and without the exchange it can only be guessed at
+/// from its after-effects (the group named "x"). Per machine, never synced
+/// or exported; holds feed headlines and summaries, never the API key.
+/// Bounded by age and size, trimmed once per run.
+enum AssistLog {
+    static let maxAge: TimeInterval = 7 * 24 * 3600
+    static let maxBytes = 2_000_000
+
+    /// One line: `prompt` is the user message as sent (the numbers in the
+    /// answer mean nothing without it), `response` the API's body as text.
+    static func line(at: Date, pass: String, model: String, status: Int, prompt: String,
+                     response: Data, outcome: [String: Any]) -> Data {
+        let entry: [String: Any] = [
+            "at": ISO8601DateFormatter().string(from: at),
+            "pass": pass,
+            "model": model,
+            "status": status,
+            "prompt": prompt,
+            "response": String(decoding: response, as: UTF8.self),
+            "outcome": outcome,
+        ]
+        var data = (try? JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data()
+        data.append(0x0A)
+        return data
+    }
+
+    static func append(_ line: Data, to url: URL) {
+        if let handle = try? FileHandle(forWritingTo: url) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: line)
+        } else {
+            try? line.write(to: url, options: .atomic)
+        }
+    }
+
+    /// The lines younger than `maxAge`, and of those the newest that fit in
+    /// `maxBytes`; nil when nothing has to go. A line without a readable
+    /// date goes too.
+    static func trimmed(_ text: String, now: Date, maxAge: TimeInterval = maxAge, maxBytes: Int = maxBytes) -> String? {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
+        let formatter = ISO8601DateFormatter()
+        var kept: [Substring] = []
+        var bytes = 0
+        for line in lines.reversed() {
+            // "at" is the first key (sortedKeys): {"at":"2026-11-16T18:30:14Z",
+            guard line.hasPrefix("{\"at\":\""),
+                  let date = formatter.date(from: String(line.dropFirst(7).prefix(20))),
+                  now.timeIntervalSince(date) <= maxAge else { continue }
+            bytes += line.utf8.count + 1
+            guard bytes <= maxBytes else { break }
+            kept.append(line)
+        }
+        guard kept.count < lines.count else { return nil }
+        return kept.reversed().map { $0 + "\n" }.joined()
+    }
+
+    static func trim(_ url: URL, now: Date = Date()) {
+        guard let data = try? Data(contentsOf: url),
+              let text = trimmed(String(decoding: data, as: UTF8.self), now: now) else { return }
+        try? Data(text.utf8).write(to: url, options: .atomic)
+    }
+}
+
 // MARK: - Store side
 
 extension AppStore {
@@ -533,6 +609,13 @@ extension AppStore {
     /// ad-hoc-signed rebuild and self-update. A test instance
     /// (VESTITEL_STATE_DIR) has its own file.
     static var aiKeyURL: URL { stateDirectory.appendingPathComponent("anthropic-api-key") }
+
+    static var assistLogURL: URL { stateDirectory.appendingPathComponent("grouping-assist.jsonl") }
+
+    private func logAssist(pass: String, model: String, status: Int, prompt: String, response: Data, outcome: [String: Any]) {
+        AssistLog.append(AssistLog.line(at: Date(), pass: pass, model: model, status: status, prompt: prompt,
+                                        response: response, outcome: outcome), to: Self.assistLogURL)
+    }
 
     static func loadAIKey() -> String? {
         guard let data = try? Data(contentsOf: aiKeyURL) else { return nil }
@@ -612,13 +695,24 @@ extension AppStore {
                 GroupingAssistant.Arrival(id: $0.id, title: $0.title, source: $0.sourceTitle, summary: $0.summary)
             }
 
+            var answered: (status: Int, data: Data)?
+            var outcome: [String: Any] = [:]
+            defer {
+                if let answered {
+                    logAssist(pass: "assign", model: GroupingAssistant.model, status: answered.status,
+                              prompt: GroupingAssistant.prompt(stories: stories, arrivals: arrivals),
+                              response: answered.data, outcome: outcome)
+                }
+            }
             do {
                 let body = GroupingAssistant.requestBody(stories: stories, arrivals: arrivals)
                 let (data, response) = try await session.data(for: GroupingAssistant.request(apiKey: key, body: body))
                 let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                answered = (status, data)
                 guard status == 200 else {
                     let (message, permanent) = describeHTTPFailure(status, data: data)
                     failure = message
+                    outcome = ["error": message]
                     if permanent { aiAssessed.formUnion(batchIDs) }
                     break
                 }
@@ -629,12 +723,18 @@ extension AppStore {
                 joined += verdict.joined
                 formed += verdict.formed
                 mismatched += verdict.mismatched
+                outcome = ["joined": verdict.joined, "formed": verdict.formed, "mismatched": verdict.mismatched,
+                           "links": verdict.hints.links.count,
+                           "headlines": Set(verdict.hints.headlines.values).sorted(),
+                           "held": inboxHoldStart != nil]
             } catch GroupingAssistant.AssistError.refused {
                 aiAssessed.formUnion(batchIDs)   // asking again changes nothing
                 failure = "Claude declined one batch."
+                outcome = ["error": "refused"]
             } catch GroupingAssistant.AssistError.truncated, GroupingAssistant.AssistError.badResponse {
                 aiAssessed.formUnion(batchIDs)
                 failure = "Couldn't read Claude's answer for one batch."
+                outcome = ["error": "unreadable"]
             } catch is CancellationError {
                 break
             } catch {
@@ -646,6 +746,7 @@ extension AppStore {
         // the heuristic groups, as they stand after the arrivals were placed
         let review: ReviewOutcome = failure == nil && !Task.isCancelled ? await runReviewPass() : ReviewOutcome()
         mismatched += review.mismatched
+        AssistLog.trim(Self.assistLogURL)
         if checked > 0 || review.reviewed > 0 || failure != nil || review.failure != nil { save() }
 
         var parts: [String] = []
@@ -696,24 +797,41 @@ extension AppStore {
         subjects = Array(subjects.prefix(40))
         context = Array(context.prefix(60))
 
+        var answered: (status: Int, data: Data)?
+        var outcome: [String: Any] = [:]
+        defer {
+            if let answered {
+                logAssist(pass: "review", model: GroupingAssistant.reviewModel, status: answered.status,
+                          prompt: GroupingAssistant.reviewPrompt(subjects: subjects, context: context),
+                          response: answered.data, outcome: outcome)
+            }
+        }
         do {
             let body = GroupingAssistant.reviewRequestBody(subjects: subjects, context: context)
             let (data, response) = try await session.data(for: GroupingAssistant.request(apiKey: key, body: body))
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            answered = (status, data)
             guard status == 200 else {
                 let (message, permanent) = describeHTTPFailure(status, data: data)
+                outcome = ["error": message]
                 if permanent { markReviewed(subjects.map(\.ids)) }
                 return ReviewOutcome(failure: message)
             }
             let verdict = try GroupingAssistant.parseReview(data, subjects: subjects, context: context)
             markReviewed(verdict.reviewed)
             stage(verdict.hints)
+            outcome = ["splits": verdict.splits, "merges": verdict.merges, "mismatched": verdict.mismatched,
+                       "links": verdict.hints.links.count, "exclusions": verdict.hints.exclusions.count,
+                       "headlines": Set(verdict.hints.headlines.values).sorted(),
+                       "held": inboxHoldStart != nil]
             return ReviewOutcome(reviewed: subjects.count, splits: verdict.splits, merges: verdict.merges, mismatched: verdict.mismatched)
         } catch GroupingAssistant.AssistError.refused {
             markReviewed(subjects.map(\.ids))
+            outcome = ["error": "refused"]
             return ReviewOutcome(failure: "Claude declined the group review.")
         } catch GroupingAssistant.AssistError.truncated, GroupingAssistant.AssistError.badResponse {
             markReviewed(subjects.map(\.ids))
+            outcome = ["error": "unreadable"]
             return ReviewOutcome(failure: "Couldn't read Claude's group review.")
         } catch is CancellationError {
             return ReviewOutcome()

@@ -164,6 +164,38 @@ struct GroupingAssistantTests {
         #expect(reviewed.reviewed.isEmpty)
     }
 
+    /// The real case: a required "headline" filled with "x" named a group.
+    @Test func placeholderHeadlineIsDropped() throws {
+        let answer = """
+        {"assignments":[{"article":1,"title":"Депутатите гласуваха","group":2,"groupTitle":"Левски победи","headline":"x"}],
+         "newGroups":[{"articles":[{"article":2,"title":"Shelly Group продадена"},{"article":3,"title":"Шнайдер Електрик купува"}],"headline":"n/a"}]}
+        """
+        let verdict = try GroupingAssistant.parse(response(answer: answer), stories: stories, arrivals: arrivals)
+        #expect(verdict.joined == 1 && verdict.formed == 1)
+        #expect(verdict.hints.links.count == 2 && verdict.hints.headlines.isEmpty)
+        #expect(!GroupingAssistant.isHeadline("x") && !GroupingAssistant.isHeadline("- -"))
+        #expect(GroupingAssistant.isHeadline("Бюджет 2027"))
+    }
+
+    @Test func assistLogKeepsRecentLinesWithinTheSizeBound() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        func line(_ daysAgo: Double, _ prompt: String) -> String {
+            String(decoding: AssistLog.line(at: now - daysAgo * 86400, pass: "assign", model: "m", status: 200,
+                                            prompt: prompt, response: Data("{\"a\":\"б/в\"}".utf8), outcome: ["joined": 1]), as: UTF8.self)
+        }
+        let old = line(8, "old"), mid = line(2, "G1:\n  - две линии"), new = line(0, "new")
+        // one object per line, whatever the prompt holds
+        #expect(mid.filter { $0 == "\n" }.count == 1)
+        let entry = try #require(JSONSerialization.jsonObject(with: Data(mid.utf8)) as? [String: Any])
+        #expect(entry["prompt"] as? String == "G1:\n  - две линии" && entry["response"] as? String == "{\"a\":\"б/в\"}")
+        // nothing to drop
+        #expect(AssistLog.trimmed(mid + new, now: now) == nil)
+        // past the age limit, and unreadable lines
+        #expect(AssistLog.trimmed(old + "garbage\n" + mid + new, now: now) == mid + new)
+        // over the size bound the newest stay
+        #expect(AssistLog.trimmed(mid + new, now: now, maxBytes: new.utf8.count) == new)
+    }
+
     @Test func echoMatchesOnWordsOnly() {
         #expect(GroupingAssistant.echoMatches("„Да, България“ иска", "„Да, България“ иска оставка"))
         #expect(GroupingAssistant.echoMatches("volkswagen id3 neo", "Volkswagen ID.3 Neo е по-добър"))

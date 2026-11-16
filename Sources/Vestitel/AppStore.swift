@@ -1381,7 +1381,7 @@ final class AppStore: ObservableObject {
         lastUpdateCheck = state.lastUpdateCheck
         lastRunVersion = state.lastRunVersion
         settingsUpdatedAt = state.settingsUpdatedAt
-        groupingHints = GroupingHints(links: Set(state.aiLinks ?? []), headlines: state.aiHeadlines ?? [:],
+        groupingHints = GroupingHints(links: Set(state.aiLinks ?? []), headlines: (state.aiHeadlines ?? [:]).filter { GroupingAssistant.isHeadline($0.value) },
                                       exclusions: Set(state.aiExclusions ?? []))
         aiAssessed = Set(state.aiAssessed ?? [])
         aiReviewed = Set((state.aiReviewed ?? []).map(Set.init))
