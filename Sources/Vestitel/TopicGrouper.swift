@@ -191,19 +191,44 @@ enum TopicGrouper {
 
     private static let embedding: NLEmbedding? = NLEmbedding.sentenceEmbedding(for: .english)
 
+    /// Guards the two memo tables below. Grouping runs on `queue` and on
+    /// the main thread (a clear regroups one group in place, ingest reads
+    /// tokens), so the tables are shared; held only around a dictionary
+    /// access, never around the work.
+    private static let cacheLock = NSLock()
+    /// The embedding model and the name tagger are single objects that are
+    /// not safe to call from two threads; one call at a time.
+    private static let modelLock = NSLock()
+    /// Where a full regrouping runs (`AppStore.groupedInbox`): over a
+    /// second for a 2000-article inbox, which used to be the main thread's.
+    static let queue = DispatchQueue(label: "vestitel.grouping", qos: .userInitiated)
+
     /// Sentence embeddings are expensive (~ms each); memoize per title so a
-    /// regroup only pays for titles it hasn't seen. Main-thread only.
+    /// regroup only pays for titles it hasn't seen. The cap is well above
+    /// any inbox: at 2000 an inbox of 2200 emptied the table on every pass
+    /// and paid for every title again.
     private static var vectorCache: [String: [Double]?] = [:]
+    private static let cacheLimit = 12_000
 
     private static func vector(for title: String) -> [Double]? {
         let key = title.lowercased()
-        if let cached = vectorCache[key] { return cached }
-        if vectorCache.count > 2000 { vectorCache.removeAll() }
+        cacheLock.lock()
+        let cached = vectorCache[key]
+        cacheLock.unlock()
+        if let cached { return cached }
         // The English model maps text it can't represent (Cyrillic above
         // all) to near-identical vectors, so without this gate any two
         // Bulgarian titles measure as "semantically the same story".
-        let v = isLikelyEnglish(title) ? embedding?.vector(for: key) : nil
+        var v: [Double]?
+        if isLikelyEnglish(title) {
+            modelLock.lock()
+            v = embedding?.vector(for: key)
+            modelLock.unlock()
+        }
+        cacheLock.lock()
+        if vectorCache.count > cacheLimit { vectorCache.removeAll() }
         vectorCache[key] = v
+        cacheLock.unlock()
         return v
     }
 
@@ -263,7 +288,6 @@ enum TopicGrouper {
     }
 
     /// The name tagger is model-backed and not free; memoize like vectors.
-    /// Main-thread only.
     private static var tokenCache: [String: TitleTokens] = [:]
     /// Debug hook (the replay harness, `VESTITEL_LINKS`): called with both
     /// titles and the rule that linked them, for every heuristic link.
@@ -271,8 +295,10 @@ enum TopicGrouper {
 
     static func tokens(_ title: String, summary: String? = nil) -> TitleTokens {
         let cacheKey = summary.map { title + "\u{0}" + $0 } ?? title
-        if let cached = tokenCache[cacheKey] { return cached }
-        if tokenCache.count > 2000 { tokenCache.removeAll() }
+        cacheLock.lock()
+        let cached = tokenCache[cacheKey]
+        cacheLock.unlock()
+        if let cached { return cached }
         var result = TitleTokens()
         // Original case, not lowercased: the name tagger keys on capitals.
         var remainder = title
@@ -342,7 +368,10 @@ enum TopicGrouper {
             }
         }
         if let summary { addContext(from: summary, to: &result) }
+        cacheLock.lock()
+        if tokenCache.count > cacheLimit { tokenCache.removeAll() }
         tokenCache[cacheKey] = result
+        cacheLock.unlock()
         return result
     }
 
@@ -470,6 +499,8 @@ enum TopicGrouper {
     private static func namePhrases(in text: String) -> [NameRun] {
         guard text.contains(where: \.isUppercase) else { return [] }
         let nameTags: Set<NLTag> = [.personalName, .placeName, .organizationName]
+        modelLock.lock()
+        defer { modelLock.unlock() }
         nameTagger.string = text
         var phrases: [NameRun] = []
         nameTagger.enumerateTags(

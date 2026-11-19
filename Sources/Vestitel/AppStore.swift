@@ -75,9 +75,12 @@ final class AppStore: ObservableObject {
     var aiReviewed: Set<Set<String>> = []
     /// Bumped whenever `groupingHints` changes: part of the grouping cache
     /// key, and a published change so the inbox re-renders.
-    @Published var hintsVersion = 0 {
-        didSet { groupCache = nil }
-    }
+    @Published var hintsVersion = 0
+    /// True while a full regrouping has been running for a moment (the
+    /// Inbox footer says so); the list shows the previous grouping.
+    @Published var isGrouping = false
+    /// Bumped when a background regrouping lands, so the list redraws.
+    @Published var groupingRevision = 0
     @Published var isRefreshing = false
     /// Feeds being fetched by the per-feed refresh button (row spinners).
     @Published var refreshingFeedIDs: Set<UUID> = []
@@ -90,6 +93,15 @@ final class AppStore: ObservableObject {
     /// Topic groups the user collapsed. Transient: group ids change when
     /// membership changes, so stale entries simply never match again.
     @Published var collapsedGroupIDs: Set<String> = []
+    /// The keyboard triage cursor in the Inbox (`TriageItem.cursor`: an
+    /// article id, or "group:<id>" for a block's header); nil until a key
+    /// starts it. In-memory, and simply ignored once it names nothing shown.
+    @Published var inboxCursor: String? = nil
+    /// Article ids of the last keyboard clears, newest last (U undoes one).
+    var triageUndo: [[String]] = []
+    /// Section key ("corner.dir.bg/futbol") to the name its feed gives it
+    /// ("Футбол"), learned from the `<category>` of every fetched item.
+    var sectionLabels: [String: String] = [:]
     private var iconAnimationTimer: Timer?
 
     /// Every article id we've ever ingested, with first-seen date, so purged
@@ -487,7 +499,7 @@ final class AppStore: ObservableObject {
 
     var groupedInbox: [TopicGroup] {
         let inbox = self.inbox
-        if settings.groupBySource { return Self.sourceGroups(inbox) }
+        if settings.groupBySource { return Self.sourceGroups(inbox, labels: sectionLabels) }
         guard settings.groupingEnabled else {
             return inbox.map { TopicGroup(id: $0.id, headline: nil, articles: [$0]) }
         }
@@ -504,17 +516,19 @@ final class AppStore: ObservableObject {
         let byID = Dictionary(inbox.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let ids = Set(byID.keys)
         let sensitivity = settings.groupingSensitivity
+        func newest(_ ids: [String]) -> Date { ids.compactMap { byID[$0]?.published }.max() ?? .distantPast }
         var structure: [(headline: String?, ids: [String])]
         if let cache = groupCache, cache.key == key {
             structure = cache.structure
+            groupingProvisional = false
         } else if let cache = groupCache, cache.sensitivity == sensitivity, cache.hints == hintsKey,
                   ids.isSubset(of: cache.ids) {
             // Only removals since the last grouping (a clear, a read
             // countdown, a hold release never removes). Groups are connected
             // components, so a removal can only split the group it left:
             // regroup that one group's survivors, keep every other as is.
-            // A full regrouping of a large inbox costs hundreds of ms on the
-            // main thread, which is what made clearing one row feel slow.
+            // A full regrouping of a large inbox costs hundreds of ms,
+            // which is what made clearing one row feel slow.
             structure = []
             for entry in cache.structure {
                 let survivors = entry.ids.filter { ids.contains($0) }
@@ -529,16 +543,33 @@ final class AppStore: ObservableObject {
                     structure.append((nil, [only]))
                 }
             }
-            structure.sort {
-                let a = $0.ids.compactMap { byID[$0]?.published }.max() ?? .distantPast
-                let b = $1.ids.compactMap { byID[$0]?.published }.max() ?? .distantPast
-                return a > b
-            }
+            structure.sort { newest($0.ids) > newest($1.ids) }
             groupCache = (key, sensitivity, hintsKey, ids, structure)
+            groupingProvisional = false
         } else {
-            let groups = TopicGrouper.group(inbox, sensitivity: sensitivity, hints: hints, frequencies: tokenFrequencies)
-            structure = groups.map { ($0.headline, $0.articles.map(\.id)) }
-            groupCache = (key, sensitivity, hintsKey, ids, structure)
+            // Anything else (arrivals, a verdict from the assist, the
+            // sensitivity slider) needs the whole inbox regrouped: over a
+            // second for 2000 articles, so it runs on `TopicGrouper.queue`
+            // and the list meanwhile shows the grouping it had, with the
+            // arrivals as rows of their own. The result lands in
+            // `finishRegroup`, which publishes and the list regroups.
+            startRegroup(key: key, inbox: inbox, sensitivity: sensitivity, hintsKey: hintsKey, hints: hints)
+            groupingProvisional = true
+            if let cached = provisionalCache, cached.key == key {
+                structure = cached.structure
+            } else {
+                var placed = Set<String>()
+                structure = []
+                for entry in groupCache?.structure ?? [] {
+                    let survivors = entry.ids.filter { ids.contains($0) }
+                    guard !survivors.isEmpty else { continue }
+                    placed.formUnion(survivors)
+                    structure.append((survivors.count > 1 ? entry.headline : nil, survivors))
+                }
+                for article in inbox where !placed.contains(article.id) { structure.append((nil, [article.id])) }
+                structure.sort { newest($0.ids) > newest($1.ids) }
+                provisionalCache = (key, structure)
+            }
         }
 
         return structure.compactMap { headline, ids in
@@ -552,24 +583,107 @@ final class AppStore: ObservableObject {
         }
     }
 
+    /// The list as drawn while a regrouping is under way, per cache key
+    /// (`groupedInbox` is read several times per render).
+    private var provisionalCache: (key: Int, structure: [(headline: String?, ids: [String])])?
+    /// Whether the last `groupedInbox` was the stand-in, not the grouping.
+    private var groupingProvisional = false
+    /// The cache key being regrouped in the background, one at a time: a
+    /// newer inbox waits for the result and starts the next from there.
+    private var regroupingKey: Int?
+    private var groupingWaiters: [CheckedContinuation<Void, Never>] = []
+
+    private func startRegroup(key: Int, inbox: [Article], sensitivity: Double, hintsKey: Int, hints: GroupingHints) {
+        guard regroupingKey == nil else { return }
+        regroupingKey = key
+        let frequencies = tokenFrequencies
+        TopicGrouper.queue.async { [weak self] in
+            let groups = TopicGrouper.group(inbox, sensitivity: sensitivity, hints: hints, frequencies: frequencies)
+            let structure = groups.map { (headline: $0.headline, ids: $0.articles.map(\.id)) }
+            let ids = Set(inbox.map(\.id))
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.finishRegroup((key, sensitivity, hintsKey, ids, structure))
+                }
+            }
+        }
+        // The "Grouping…" note only for a pass that takes long enough to
+        // be noticed; and never published from inside a view update, which
+        // is where this is usually called from.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.regroupingKey != nil, !self.isGrouping else { return }
+                self.isGrouping = true
+            }
+        }
+    }
+
+    private func finishRegroup(_ result: (key: Int, sensitivity: Double, hints: Int, ids: Set<String>,
+                                          structure: [(headline: String?, ids: [String])])) {
+        groupCache = result
+        provisionalCache = nil
+        regroupingKey = nil
+        // The inbox may have moved on meanwhile: a clear is folded into
+        // this result in place, anything else starts the next pass from it.
+        _ = groupedInbox
+        if regroupingKey == nil {
+            isGrouping = false
+            let waiters = groupingWaiters
+            groupingWaiters = []
+            waiters.forEach { $0.resume() }
+        }
+        groupingRevision += 1
+    }
+
+    /// The grouping proper, for callers that reason about groups (the
+    /// assist): waits out a regrouping instead of taking the stand-in.
+    func settledGroupedInbox() async -> [TopicGroup] {
+        while true {
+            let groups = groupedInbox
+            guard groupingProvisional, regroupingKey != nil else { return groups }
+            await withCheckedContinuation { groupingWaiters.append($0) }
+        }
+    }
+
     /// One block per feed, newest feed first, members newest first (the
     /// inbox is already sorted). A feed with one article is still a block,
-    /// so the mode reads the same top to bottom.
-    private static func sourceGroups(_ inbox: [Article]) -> [TopicGroup] {
+    /// so the mode reads the same top to bottom. A feed that spans several
+    /// sections (`Sections.buckets`) is one block per section instead,
+    /// largest first, so a rubric can be folded or cleared in one go.
+    static func sourceGroups(_ inbox: [Article], labels: [String: String] = [:]) -> [TopicGroup] {
         var order: [UUID] = []
         var members: [UUID: [Article]] = [:]
         for article in inbox {
             if members[article.feedID] == nil { order.append(article.feedID) }
             members[article.feedID, default: []].append(article)
         }
-        return order.map { feedID in
+        return order.flatMap { feedID -> [TopicGroup] in
             let articles = members[feedID] ?? []
-            return TopicGroup(
-                id: "source|\(feedID.uuidString)",
-                headline: articles.first?.sourceTitle,
-                articles: articles,
-                sourceFeedID: feedID
-            )
+            let source = articles.first?.sourceTitle ?? ""
+            guard let buckets = Sections.buckets(articles) else {
+                return [TopicGroup(
+                    id: "source|\(feedID.uuidString)",
+                    headline: source,
+                    articles: articles,
+                    sourceFeedID: feedID
+                )]
+            }
+            // one name on two sections (Dir.bg has "Новини" under auto.
+            // and under trip.) is told apart by the subdomain
+            let names = buckets.map { $0.key.isEmpty ? "Other" : labels[$0.key] ?? Sections.slugLabel($0.key) }
+            let repeated = Dictionary(names.map { ($0, 1) }, uniquingKeysWith: +).filter { $0.value > 1 }
+            return zip(buckets, names).map { bucket, name in
+                var label = name
+                if repeated[name] != nil, let sub = bucket.key.split(separator: ".").first, !bucket.key.isEmpty {
+                    label += " (\(sub))"
+                }
+                return TopicGroup(
+                    id: "source|\(feedID.uuidString)|\(bucket.key)",
+                    headline: "\(source) · \(label)",
+                    articles: bucket.articles,
+                    sourceFeedID: feedID
+                )
+            }
         }
     }
 
@@ -813,6 +927,11 @@ final class AppStore: ObservableObject {
             notifiedBlockedFeeds.remove(feedID)
             if feeds[idx].title.isEmpty, !parsed.title.isEmpty {
                 feeds[idx].title = parsed.title
+            }
+            for item in parsed.items {
+                if let label = Sections.cleanCategory(item.category), let key = Sections.key(for: item.link) {
+                    sectionLabels[key] = label
+                }
             }
             return ingest(parsed.items, into: feeds[idx])
         case .failure(let error):
@@ -1301,6 +1420,8 @@ final class AppStore: ObservableObject {
         var aiAssessed: [String]?
         var aiExclusions: [String]?
         var aiReviewed: [[String]]?
+        // section names learned from the feeds, optional likewise
+        var sectionLabels: [String: String]?
     }
 
     /// Application Support/Vestitel (also home to the local events drop
@@ -1356,7 +1477,8 @@ final class AppStore: ObservableObject {
             aiHeadlines: groupingHints.headlines,
             aiAssessed: aiAssessed.sorted(),
             aiExclusions: groupingHints.exclusions.sorted(),
-            aiReviewed: aiReviewed.map { $0.sorted() }.sorted { $0.joined() < $1.joined() }
+            aiReviewed: aiReviewed.map { $0.sorted() }.sorted { $0.joined() < $1.joined() },
+            sectionLabels: sectionLabels
         )
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -1386,6 +1508,7 @@ final class AppStore: ObservableObject {
         groupingHints = GroupingHints(links: Set(state.aiLinks ?? []), headlines: (state.aiHeadlines ?? [:]).filter { GroupingAssistant.isHeadline($0.value) },
                                       exclusions: Set(state.aiExclusions ?? []))
         aiAssessed = Set(state.aiAssessed ?? [])
+        sectionLabels = state.sectionLabels ?? [:]
         aiReviewed = Set((state.aiReviewed ?? []).map(Set.init))
         // last: its didSet fires save() → writeSyncDocument(), which must see
         // the fully loaded state (machineID above all). adoptingSettings:

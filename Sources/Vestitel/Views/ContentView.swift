@@ -303,6 +303,8 @@ struct ArticleRow: View {
     private static let commitFraction: CGFloat = 0.75
 
     private var canClear: Bool { article.state == .inbox }
+    /// The keyboard triage cursor is on this row (Inbox only).
+    private var underCursor: Bool { article.state == .inbox && store.inboxCursor == article.id }
     private var compact: Bool { store.settings.compactRows }
 
     /// Article description shown as a tooltip on stationary hover; nil when
@@ -594,7 +596,8 @@ struct ArticleRow: View {
             dragOffset != 0 ? Color(nsColor: .windowBackgroundColor) : .clear,
             in: RoundedRectangle(cornerRadius: 8)
         )
-        .background(hovering ? Color.primary.opacity(0.06) : .clear, in: RoundedRectangle(cornerRadius: 8))
+        .background(underCursor ? Color.accentColor.opacity(0.22) : hovering ? Color.primary.opacity(0.06) : .clear,
+                    in: RoundedRectangle(cornerRadius: 8))
         .contextMenu {
             Button("Open in Browser") { store.open(article) }
             Button("Copy Link") { store.copyLink(article) }

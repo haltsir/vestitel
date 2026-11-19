@@ -12,6 +12,8 @@ struct ParsedItem {
     var summary: String?
     var published: Date?
     var imageURL: URL? = nil
+    /// The item's first `<category>` (Atom: its label or term), as written.
+    var category: String? = nil
     /// Local-source only (see LocalEvent); feeds never set these.
     var tag: String? = nil
     var symbol: String? = nil
@@ -210,6 +212,10 @@ final class FeedParser: NSObject, XMLParserDelegate {
                insideItem, atomLinkCandidate == nil {
                 atomLinkCandidate = href
             }
+        case "category" where isAtom:
+            if insideItem, current.category == nil {
+                current.category = attributeDict["label"] ?? attributeDict["term"]
+            }
         case "enclosure", "content", "thumbnail":
             // media:content / media:thumbnail / RSS enclosure — the localName
             // strip maps them here. Atom's <content> has no url attr: skipped.
@@ -271,6 +277,8 @@ final class FeedParser: NSObject, XMLParserDelegate {
                 if current.imageURL == nil {
                     current.imageURL = Self.firstImageURL(inHTML: value)
                 }
+            case "category":
+                if current.category == nil, !value.isEmpty { current.category = value }
             case "pubDate", "published", "updated", "date":
                 if current.published == nil || name == "published" || name == "pubDate" {
                     current.published = Self.parseDate(value) ?? current.published

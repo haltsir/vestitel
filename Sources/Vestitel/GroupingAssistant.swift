@@ -714,7 +714,7 @@ extension AppStore {
             let batch = Array(waiting.prefix(GroupingAssistant.batchSize))
             let batchIDs = Set(batch.map(\.id))
             let cutoff = (batch.map(\.published).min() ?? Date()) - GroupingAssistant.window
-            let stories = existingStories(excluding: batchIDs, since: cutoff, in: all)
+            let stories = existingStories(excluding: batchIDs, since: cutoff, in: all, groups: await settledGroupedInbox())
             let arrivals = batch.map {
                 GroupingAssistant.Arrival(id: $0.id, title: $0.title, source: $0.sourceTitle, summary: $0.summary)
             }
@@ -814,7 +814,7 @@ extension AppStore {
         let cutoff = Date() - GroupingAssistant.window
         var subjects: [GroupingAssistant.Story] = []
         var context: [GroupingAssistant.Story] = []
-        for group in groupedInbox where group.articles.count > 1 && group.newest >= cutoff {
+        for group in await settledGroupedInbox() where group.articles.count > 1 && group.newest >= cutoff {
             let ids = group.articles.map(\.id)
             let story = GroupingAssistant.Story(ids: ids, headline: group.headline,
                                                 members: group.articles.map { ($0.title, $0.sourceTitle) })
@@ -894,11 +894,12 @@ extension AppStore {
     /// the batch and anything older than the window removed. In group-by-
     /// source mode the topic grouping is not at hand, so every article is
     /// its own story; Claude still sees them all.
-    private func existingStories(excluding batch: Set<String>, since cutoff: Date, in all: [Article]) -> [GroupingAssistant.Story] {
+    private func existingStories(excluding batch: Set<String>, since cutoff: Date, in all: [Article],
+                                 groups: [TopicGroup]) -> [GroupingAssistant.Story] {
         var covered = Set<String>()
         var stories: [GroupingAssistant.Story] = []
         if settings.groupingEnabled, !settings.groupBySource {
-            for group in groupedInbox {
+            for group in groups {
                 let members = group.articles.filter { !batch.contains($0.id) && $0.published >= cutoff }
                 guard !members.isEmpty else { continue }
                 covered.formUnion(members.map(\.id))

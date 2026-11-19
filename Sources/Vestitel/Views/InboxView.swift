@@ -40,30 +40,73 @@ struct InboxView: View {
                     )
                 }
             } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(groups) { group in
-                            if group.articles.count > 1 || group.sourceFeedID != nil {
-                                GroupBlock(group: group)
-                            } else {
-                                ArticleRow(article: group.articles[0])
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(groups) { group in
+                                if group.sourceFeedID != nil {
+                                    // A source or section block can hold
+                                    // hundreds of rows: its header and each
+                                    // row are items of the lazy stack, drawn
+                                    // as slices of one card. As one view
+                                    // (a VStack of 208 rows) the block was
+                                    // laid out whole on every change, and a
+                                    // cursor step took most of a second.
+                                    GroupBlock(group: group, headerOnly: true)
+                                        .id(TriageItem.headerCursor(group.id))
+                                    if !store.collapsedGroupIDs.contains(group.id) {
+                                        ForEach(group.articles) { article in
+                                            SourceBlockRow(article: article, isLast: article.id == group.articles.last?.id)
+                                        }
+                                    }
+                                } else if group.hasHeader {
+                                    GroupBlock(group: group)
+                                        .id(TriageItem.headerCursor(group.id))
+                                } else {
+                                    ArticleRow(article: group.articles[0])
+                                        .padding(.vertical, 1)
+                                }
                             }
                         }
+                        .padding(.vertical, 8)
+                        .padding(.horizontal, 6)
+                        .overlayScrollers()
                     }
-                    .padding(.vertical, 8)
-                    .padding(.horizontal, 6)
-                    .overlayScrollers()
+                    // The cursor stays in view: headers carry their cursor
+                    // string as id, rows their article id (a lone row's
+                    // block id is the article id). No anchor, so nothing
+                    // moves while the cursor is already on screen.
+                    .onChange(of: store.inboxCursor) { _, cursor in
+                        if let cursor { proxy.scrollTo(cursor) }
+                    }
                 }
             }
 
             Divider()
             footer
         }
+        .background(TriageKeys { store.triage($0) })
     }
 
     private var footer: some View {
         HStack {
-            if let last = store.lastRefresh {
+            if store.inboxCursor != nil {
+                // while the keys are in use, what they do
+                Text("Space clear · ⏎ open · B bookmark · U undo")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .help("↑ ↓ (or K J) move · Space (or X) clear the row, or the whole block on its header · Return (or O) open · B bookmark · ← → fold and unfold a block · ⌥← ⌥→ fold and unfold all · U undo the last clear · Esc put the cursor away")
+            } else if store.isGrouping {
+                // a full regrouping runs in the background; the list
+                // shows the previous grouping until it lands
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Grouping…")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                }
+            } else if let last = store.lastRefresh {
                 Text("Updated \(last.articleDisplay)")
                     .font(.system(size: 11.5))
                     .foregroundStyle(.tertiary)
@@ -87,6 +130,73 @@ struct InboxView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+    }
+}
+
+/// The Inbox's keys (`AppStore.triage`), read by a local key-down monitor
+/// for as long as the view is in the popover: the list is not a focusable
+/// control, and SwiftUI key handlers need focus. Keys are matched by
+/// position (key code), so J/K/X/O/B/U work on the Bulgarian layout too.
+/// Nothing is taken while a text field is being edited (the filter), with
+/// ⌘ or ⌃ held, or when the key did nothing.
+private struct TriageKeys: NSViewRepresentable {
+    let handle: (TriageKey) -> Bool
+
+    final class Probe: NSView {
+        var handle: ((TriageKey) -> Bool)?
+        private var monitor: Any?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self, let window = self.window, event.window === window,
+                      !(window.firstResponder is NSText),
+                      let key = Self.key(for: event),
+                      self.handle?(key) == true else { return event }
+                return nil
+            }
+        }
+
+        deinit {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+        }
+
+        static func key(for event: NSEvent) -> TriageKey? {
+            let flags = event.modifierFlags.intersection([.command, .control, .option, .shift])
+            if flags == .option {
+                switch event.keyCode {
+                case 123: return .collapseAll
+                case 124: return .expandAll
+                default: return nil
+                }
+            }
+            guard flags.isEmpty else { return nil }
+            switch event.keyCode {
+            case 125, 38: return .down        // ↓ J
+            case 126, 40: return .up          // ↑ K
+            case 49, 7: return .clear         // Space X
+            case 36, 76, 31: return .open     // Return Enter O
+            case 11: return .bookmark         // B
+            case 124: return .expand          // →
+            case 123: return .collapse        // ←
+            case 32: return .undo             // U
+            case 53: return .escape
+            default: return nil
+            }
+        }
+    }
+
+    func makeNSView(context: Context) -> Probe {
+        let view = Probe()
+        view.handle = handle
+        return view
+    }
+
+    func updateNSView(_ nsView: Probe, context: Context) {
+        nsView.handle = handle
     }
 }
 
@@ -261,6 +371,9 @@ struct SmartInboxBar: View {
 struct GroupBlock: View {
     @EnvironmentObject var store: AppStore
     let group: TopicGroup
+    /// Only the header, as the top slice of a card whose rows follow as
+    /// separate items of the list (`SourceBlockRow`).
+    var headerOnly = false
     @State private var dragOffset: CGFloat = 0
     @State private var armed = false
     @State private var dragIsHorizontal: Bool? = nil
@@ -270,7 +383,14 @@ struct GroupBlock: View {
     private static let commitFraction: CGFloat = 0.75
 
     private var collapsed: Bool { store.collapsedGroupIDs.contains(group.id) }
+    private var underCursor: Bool { store.inboxCursor == TriageItem.headerCursor(group.id) }
     private var isSourceGroup: Bool { group.sourceFeedID != nil }
+    /// The card's outline: whole, or just its top while rows follow.
+    private var cardShape: UnevenRoundedRectangle {
+        let bottom: CGFloat = headerOnly && !collapsed ? 0 : 10
+        return UnevenRoundedRectangle(topLeadingRadius: 10, bottomLeadingRadius: bottom,
+                                      bottomTrailingRadius: bottom, topTrailingRadius: 10)
+    }
     /// Topic groups wear the accent; a source block wears its feed's colour.
     private var tint: Color {
         guard let first = group.articles.first, isSourceGroup else { return .accentColor }
@@ -411,6 +531,9 @@ struct GroupBlock: View {
             .padding(.leading, 14)
             .padding(.trailing, 8)
             .padding(.vertical, 7)
+            // the keyboard cursor on the header: Space clears the block
+            .background(underCursor ? Color.accentColor.opacity(0.22) : .clear,
+                        in: RoundedRectangle(cornerRadius: 9))
             .contentShape(Rectangle())
             // The whole band toggles collapse; the × is a Button and keeps
             // its own clicks. The swipe gesture needs 6 pt of movement, so
@@ -419,7 +542,7 @@ struct GroupBlock: View {
             .help(collapsed ? "Expand group" : "Collapse group")
             .gesture(headerDragGesture)
 
-            if !collapsed {
+            if !collapsed, !headerOnly {
                 // The photo runs edge to edge straight under the band, inset
                 // by the block's 1 pt border so it touches the border rather
                 // than running under it.
@@ -449,14 +572,64 @@ struct GroupBlock: View {
         // slab in a grey popover, and a neutral lift read as washed out.
         // The material darkens and blurs the backdrop into a card instead.
         .background(
-            RoundedRectangle(cornerRadius: 10)
+            cardShape
                 .fill(.thickMaterial)
-                .overlay(RoundedRectangle(cornerRadius: 10).fill(tint.opacity(0.08)))
+                .overlay(cardShape.fill(tint.opacity(0.08)))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 10)
+            cardShape
                 .strokeBorder(tint.opacity(0.35), lineWidth: 1)
         )
-        .padding(.vertical, 5)
+        .padding(.top, 5)
+        .padding(.bottom, headerOnly && !collapsed ? 0 : 5)
+    }
+}
+
+/// One row of a source or section block, drawn as a slice of the block's
+/// card: the same material, tint and side borders as `GroupBlock`, closed
+/// with rounded corners under the last row.
+struct SourceBlockRow: View {
+    @EnvironmentObject var store: AppStore
+    let article: Article
+    let isLast: Bool
+
+    var body: some View {
+        let tint = store.sourceColor(feedID: article.feedID, title: article.sourceTitle)
+        let radius: CGFloat = isLast ? 10 : 0
+        let slice = UnevenRoundedRectangle(bottomLeadingRadius: radius, bottomTrailingRadius: radius)
+        ArticleRow(article: article, placement: .member, hidesSource: true)
+            .padding(.horizontal, 6)
+            .padding(.top, 1)
+            .padding(.bottom, isLast ? 6 : 1)
+            .background(slice.fill(.thickMaterial).overlay(slice.fill(tint.opacity(0.08))))
+            .overlay(SliceBorder(radius: radius, closed: isLast).stroke(tint.opacity(0.35), lineWidth: 1))
+            .padding(.bottom, isLast ? 5 : 0)
+    }
+}
+
+/// The card's border along one slice: both sides, and the rounded bottom
+/// under the last one. Inset half a point so the 1 pt line stays inside,
+/// in line with the header's `strokeBorder`.
+private struct SliceBorder: Shape {
+    let radius: CGFloat
+    let closed: Bool
+
+    func path(in rect: CGRect) -> Path {
+        let r = rect.insetBy(dx: 0.5, dy: 0)
+        var path = Path()
+        guard closed else {
+            path.move(to: CGPoint(x: r.minX, y: r.minY)); path.addLine(to: CGPoint(x: r.minX, y: r.maxY))
+            path.move(to: CGPoint(x: r.maxX, y: r.minY)); path.addLine(to: CGPoint(x: r.maxX, y: r.maxY))
+            return path
+        }
+        let bottom = r.maxY - 0.5
+        let corner = max(radius - 0.5, 0)
+        path.move(to: CGPoint(x: r.minX, y: r.minY))
+        path.addLine(to: CGPoint(x: r.minX, y: bottom - corner))
+        path.addArc(tangent1End: CGPoint(x: r.minX, y: bottom), tangent2End: CGPoint(x: r.minX + corner, y: bottom), radius: corner)
+        path.addLine(to: CGPoint(x: r.maxX - corner, y: bottom))
+        path.addArc(tangent1End: CGPoint(x: r.maxX, y: bottom), tangent2End: CGPoint(x: r.maxX, y: bottom - corner), radius: corner)
+        path.addLine(to: CGPoint(x: r.maxX, y: r.minY))
+        return path
     }
 }

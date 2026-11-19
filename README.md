@@ -37,7 +37,14 @@ remembered in **Archive**; anything you want to keep is a **Bookmark**.
   header to collapse the group, swipe or × to clear it. Tune or turn off in
   Settings.
 - **Group by source**: the Inbox header's grid button switches to one block
-  per feed instead of topic groups.
+  per feed instead of topic groups. A feed that spans several sections
+  (Dir.bg's Футбол, Свят, Политика…) becomes one block per section, largest
+  first, so a whole rubric can be folded or cleared at once.
+- **Keyboard triage**: with the Inbox open, ↓ ↑ (or J K) move a cursor through
+  the list, Space (or X) clears the row and moves on, Return (or O) opens it,
+  B bookmarks, U undoes the last clear. On a block's header Space clears the
+  whole block; ← → fold and unfold it, ⌥← ⌥→ all of them. Esc puts the cursor
+  away.
 - **Smart inboxes**: saved views of the Inbox, like Mail's smart mailboxes:
   keywords (any/all) and optional sources. They show as subtabs at the top of
   the Inbox with unread counts, in the order you choose; the ones that don't
