@@ -63,6 +63,8 @@ final class AppStore: ObservableObject {
     /// What the last run did, or why it failed; shown under the toggle.
     @Published var aiStatus = ""
     var aiTask: Task<Void, Never>? = nil
+    /// Arrivals already asked about a second time after a dropped verdict (in-memory).
+    var aiRetried = Set<String>()
     /// Every same-story verdict so far (persisted, pruned with the articles).
     var groupingHints = GroupingHints()
     /// Verdicts that arrived while the inbox was held; applied when it lifts.

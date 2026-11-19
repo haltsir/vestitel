@@ -97,6 +97,8 @@ enum GroupingAssistant {
         var formed = 0
         /// Verdicts dropped because the echoed title did not match the number.
         var mismatched = 0
+        /// Arrivals a dropped verdict named: worth asking about once more.
+        var dropped: Set<String> = []
     }
 
     enum AssistError: Error, Equatable {
@@ -122,10 +124,13 @@ enum GroupingAssistant {
     """
 
     static let echoRule = """
-    Next to every number you give, put in "title" the first three words of the headline that \
-    number stands for, copied exactly from the list (for a group, the first three words of its \
-    first listed member). An entry whose words do not match its number is discarded, so check \
-    the number against the words before you write it.
+    Right after every number you give comes a field for the title it stands for (articleTitle \
+    after an article number, groupTitle after a group number, memberTitle after a member number): \
+    put there the first three words of that item's own line, copied exactly from the list (for a \
+    group, the first three words of its first listed member). An article joining a group often \
+    words the same story differently, in another script or language even: articleTitle is the \
+    article's own wording, never the group's. An entry whose words do not match its number is \
+    discarded.
     """
 
     static let systemPrompt = """
@@ -164,12 +169,19 @@ enum GroupingAssistant {
     \(echoRule)
     """
 
-    /// A number plus the echoed title it stands for (`echoRule`).
+    /// A number plus the echoed title it stands for (`echoRule`). The
+    /// field names are chosen so that sorted keys (how `body` serialises)
+    /// put each number first, its echo right after it and the headline
+    /// last: the answer follows the schema's order, and from an unordered
+    /// dictionary it once came out as headline, title, article, with the
+    /// echo written before the number it was meant to check and worded
+    /// like the headline just written („Антропик набра рекордните“ for an
+    /// article titled "Anthropic набра 81 млрд.").
     private static func numbered(_ key: String) -> [String: Any] {
         [
             "type": "object",
-            "properties": [key: ["type": "integer"], "title": ["type": "string"]],
-            "required": [key, "title"],
+            "properties": [key: ["type": "integer"], key + "Title": ["type": "string"]],
+            "required": [key, key + "Title"],
             "additionalProperties": false,
         ]
     }
@@ -183,10 +195,10 @@ enum GroupingAssistant {
                     "type": "object",
                     "properties": [
                         "group": ["type": "integer"],
-                        "title": ["type": "string"],
+                        "groupTitle": ["type": "string"],
                         "stories": ["type": "array", "items": ["type": "array", "items": numbered("member")]],
                     ],
-                    "required": ["group", "title", "stories"],
+                    "required": ["group", "groupTitle", "stories"],
                     "additionalProperties": false,
                 ],
             ],
@@ -216,12 +228,12 @@ enum GroupingAssistant {
                     "type": "object",
                     "properties": [
                         "article": ["type": "integer"],
-                        "title": ["type": "string"],
+                        "articleTitle": ["type": "string"],
                         "group": ["type": "integer"],
                         "groupTitle": ["type": "string"],
                         "headline": ["type": "string"],
                     ],
-                    "required": ["article", "title", "group", "groupTitle", "headline"],
+                    "required": ["article", "articleTitle", "group", "groupTitle", "headline"],
                     "additionalProperties": false,
                 ],
             ],
@@ -290,7 +302,7 @@ enum GroupingAssistant {
                 ["role": "user", "content": prompt],
             ],
         ]
-        return (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
+        return (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
     }
 
     static func request(apiKey: String, body: Data) -> URLRequest {
@@ -350,7 +362,7 @@ enum GroupingAssistant {
         let subjectTitles = subjects.map(\.firstTitle), allTitles = all.map(\.firstTitle)
 
         for item in answer["splits"] as? [[String: Any]] ?? [] {
-            guard let g = index(item, key: "group", echo: "title", in: subjectTitles, mismatched: &verdict.mismatched) else { continue }
+            guard let g = index(item, key: "group", echo: "groupTitle", in: subjectTitles, mismatched: &verdict.mismatched) else { continue }
             let story = subjects[g]
             let memberTitles = story.members.map(\.title)
             // a split with a wrong member number is not this group's verdict:
@@ -365,7 +377,7 @@ enum GroupingAssistant {
             for list in item["stories"] as? [[[String: Any]]] ?? [] {
                 var members: [Int] = []
                 for entry in list {
-                    if let m = index(entry, key: "member", echo: "title", in: memberTitles, mismatched: &verdict.mismatched),
+                    if let m = index(entry, key: "member", echo: "memberTitle", in: memberTitles, mismatched: &verdict.mismatched),
                        story.ids.indices.contains(m), part[m] == -1 {
                         part[m] = listed.count
                         members.append(m)
@@ -395,7 +407,7 @@ enum GroupingAssistant {
         for item in answer["merges"] as? [[String: Any]] ?? [] {
             var groups: [Int] = []
             for entry in item["groups"] as? [[String: Any]] ?? [] {
-                guard let g = index(entry, key: "group", echo: "title", in: allTitles, mismatched: &verdict.mismatched),
+                guard let g = index(entry, key: "group", echo: "groupTitle", in: allTitles, mismatched: &verdict.mismatched),
                       !merged.contains(g), !groups.contains(g) else { continue }
                 groups.append(g)
             }
@@ -425,9 +437,15 @@ enum GroupingAssistant {
         let arrivalTitles = arrivals.map(\.title), storyTitles = stories.map(\.firstTitle)
 
         for item in answer["assignments"] as? [[String: Any]] ?? [] {
-            guard let a = index(item, key: "article", echo: "title", in: arrivalTitles, mismatched: &verdict.mismatched),
+            let before = verdict.mismatched
+            guard let a = index(item, key: "article", echo: "articleTitle", in: arrivalTitles, mismatched: &verdict.mismatched),
                   let g = index(item, key: "group", echo: "groupTitle", in: storyTitles, mismatched: &verdict.mismatched),
-                  !placed.contains(a) else { continue }
+                  !placed.contains(a) else {
+                if verdict.mismatched > before, let n = item["article"] as? Int, arrivals.indices.contains(n - 1) {
+                    verdict.dropped.insert(arrivals[n - 1].id)
+                }
+                continue
+            }
             placed.insert(a)
             let arrival = arrivals[a], story = stories[g]
             guard let anchor = story.ids.first else { continue }
@@ -441,8 +459,12 @@ enum GroupingAssistant {
         for item in answer["newGroups"] as? [[String: Any]] ?? [] {
             var members: [Int] = []
             for entry in item["articles"] as? [[String: Any]] ?? [] {
-                guard let a = index(entry, key: "article", echo: "title", in: arrivalTitles, mismatched: &verdict.mismatched),
-                      !placed.contains(a), !members.contains(a) else { continue }
+                let before = verdict.mismatched
+                guard let a = index(entry, key: "article", echo: "articleTitle", in: arrivalTitles, mismatched: &verdict.mismatched),
+                      !placed.contains(a), !members.contains(a) else {
+                    if verdict.mismatched > before, let n = entry["article"] as? Int { verdict.dropped.insert(arrivals[n - 1].id) }
+                    continue
+                }
                 members.append(a)
             }
             guard members.count >= 2 else { continue }
@@ -542,7 +564,9 @@ enum GroupingAssistant {
 /// Bounded by age and size, trimmed once per run.
 enum AssistLog {
     static let maxAge: TimeInterval = 7 * 24 * 3600
-    static let maxBytes = 2_000_000
+    /// A request is ~35 KB (the prompt lists the current groups), about a
+    /// hundred a day: 2 MB held 18 hours.
+    static let maxBytes = 10_000_000
 
     /// One line: `prompt` is the user message as sent (the numbers in the
     /// answer mean nothing without it), `response` the API's body as text.
@@ -717,13 +741,20 @@ extension AppStore {
                     break
                 }
                 let verdict = try GroupingAssistant.parse(data, stories: stories, arrivals: arrivals)
-                aiAssessed.formUnion(verdict.assessed)
+                // a verdict dropped for its echo was most likely right about
+                // the story (the Anthropic IPO under a Latin and a Cyrillic
+                // name was joined correctly and thrown away): its article
+                // is asked about once more, then counts as assessed
+                let again = verdict.dropped.subtracting(aiRetried)
+                aiRetried.formUnion(again)
+                aiAssessed.formUnion(verdict.assessed.subtracting(again))
                 stage(verdict.hints)
                 checked += arrivals.count
                 joined += verdict.joined
                 formed += verdict.formed
                 mismatched += verdict.mismatched
                 outcome = ["joined": verdict.joined, "formed": verdict.formed, "mismatched": verdict.mismatched,
+                           "retry": again.count,
                            "links": verdict.hints.links.count,
                            "headlines": Set(verdict.hints.headlines.values).sorted(),
                            "held": inboxHoldStart != nil]

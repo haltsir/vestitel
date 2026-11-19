@@ -50,10 +50,10 @@ struct GroupingAssistantTests {
 
     @Test func parseTurnsAssignmentsAndNewGroupsIntoHints() throws {
         let answer = """
-        {"assignments":[{"article":1,"title":"Депутатите гласуваха бюджета","group":1,"groupTitle":"Парламентът прие бюджета","headline":"Бюджет 2027 приет."}],
-         "newGroups":[{"articles":[{"article":2,"title":"Shelly Group продадена"},{"article":3,"title":"Шнайдер Електрик купува"}],"headline":"Schneider купува Shelly"},
-                      {"articles":[{"article":4,"title":"Времето утре"}],"headline":"lonely"},
-                      {"articles":[{"article":9,"title":"x"},{"article":2,"title":"Shelly Group продадена"}],"headline":"out of range"}]}
+        {"assignments":[{"article":1,"articleTitle":"Депутатите гласуваха бюджета","group":1,"groupTitle":"Парламентът прие бюджета","headline":"Бюджет 2027 приет."}],
+         "newGroups":[{"articles":[{"article":2,"articleTitle":"Shelly Group продадена"},{"article":3,"articleTitle":"Шнайдер Електрик купува"}],"headline":"Schneider купува Shelly"},
+                      {"articles":[{"article":4,"articleTitle":"Времето утре"}],"headline":"lonely"},
+                      {"articles":[{"article":9,"articleTitle":"x"},{"article":2,"articleTitle":"Shelly Group продадена"}],"headline":"out of range"}]}
         """
         let verdict = try GroupingAssistant.parse(response(answer: answer), stories: stories, arrivals: arrivals)
         #expect(verdict.assessed == ["a1", "a2", "a3", "a4"])
@@ -116,13 +116,13 @@ struct GroupingAssistantTests {
         ]
         let context = [stories[0]]   // G3: s1, s2
         let answer = """
-        {"splits":[{"group":1,"title":"NFL opener","stories":[[{"member":2,"title":"Левски загуби"},{"member":3,"title":"Левски: първа загуба"}]]},
-                   {"group":2,"title":"Бюджетът мина","stories":[[{"member":1,"title":"Бюджетът мина"},{"member":2,"title":"Приеха бюджета"}]]},
-                   {"group":3,"title":"Парламентът прие бюджета","stories":[[{"member":1,"title":"Парламентът прие бюджета"}]]},
-                   {"group":9,"title":"x","stories":[[{"member":1,"title":"x"}]]}],
-         "merges":[{"groups":[{"group":2,"title":"Бюджетът мина"},{"group":3,"title":"Парламентът прие"}],"headline":"Бюджет 2027 приет"},
-                   {"groups":[{"group":1,"title":"NFL opener"}],"headline":"x"},
-                   {"groups":[{"group":3,"title":"Парламентът прие"},{"group":2,"title":"Бюджетът мина"}],"headline":"dup"}]}
+        {"splits":[{"group":1,"groupTitle":"NFL opener","stories":[[{"member":2,"memberTitle":"Левски загуби"},{"member":3,"memberTitle":"Левски: първа загуба"}]]},
+                   {"group":2,"groupTitle":"Бюджетът мина","stories":[[{"member":1,"memberTitle":"Бюджетът мина"},{"member":2,"memberTitle":"Приеха бюджета"}]]},
+                   {"group":3,"groupTitle":"Парламентът прие бюджета","stories":[[{"member":1,"memberTitle":"Парламентът прие бюджета"}]]},
+                   {"group":9,"groupTitle":"x","stories":[[{"member":1,"memberTitle":"x"}]]}],
+         "merges":[{"groups":[{"group":2,"groupTitle":"Бюджетът мина"},{"group":3,"groupTitle":"Парламентът прие"}],"headline":"Бюджет 2027 приет"},
+                   {"groups":[{"group":1,"groupTitle":"NFL opener"}],"headline":"x"},
+                   {"groups":[{"group":3,"groupTitle":"Парламентът прие"},{"group":2,"groupTitle":"Бюджетът мина"}],"headline":"dup"}]}
         """
         let verdict = try GroupingAssistant.parseReview(response(answer: answer), subjects: subjects, context: context)
         #expect(verdict.mismatched == 0)
@@ -143,9 +143,9 @@ struct GroupingAssistantTests {
     /// the slip and the verdict is dropped, not applied.
     @Test func mismatchedTitleEchoDropsTheVerdict() throws {
         let answer = """
-        {"assignments":[{"article":2,"title":"Депутатите гласуваха бюджета","group":1,"groupTitle":"Парламентът прие","headline":"wrong article number"},
-                        {"article":1,"title":"Депутатите гласуваха","group":2,"groupTitle":"Парламентът прие","headline":"wrong group number"}],
-         "newGroups":[{"articles":[{"article":3,"title":"Шнайдер Електрик купува"},{"article":4,"title":"Shelly Group продадена"}],"headline":"Schneider купува Shelly"}]}
+        {"assignments":[{"article":2,"articleTitle":"Депутатите гласуваха бюджета","group":1,"groupTitle":"Парламентът прие","headline":"wrong article number"},
+                        {"article":1,"articleTitle":"Депутатите гласуваха","group":2,"groupTitle":"Парламентът прие","headline":"wrong group number"}],
+         "newGroups":[{"articles":[{"article":3,"articleTitle":"Шнайдер Електрик купува"},{"article":4,"articleTitle":"Shelly Group продадена"}],"headline":"Schneider купува Shelly"}]}
         """
         let verdict = try GroupingAssistant.parse(response(answer: answer), stories: stories, arrivals: arrivals)
         #expect(verdict.hints.isEmpty)
@@ -154,8 +154,8 @@ struct GroupingAssistantTests {
         #expect(verdict.assessed == ["a1", "a2", "a3", "a4"])
 
         let review = """
-        {"splits":[{"group":1,"title":"Парламентът прие","stories":[[{"member":2,"title":"Парламентът прие бюджета"}]]}],
-         "merges":[{"groups":[{"group":1,"title":"Парламентът прие"},{"group":2,"title":"Парламентът прие"}],"headline":"x"}]}
+        {"splits":[{"group":1,"groupTitle":"Парламентът прие","stories":[[{"member":2,"memberTitle":"Парламентът прие бюджета"}]]}],
+         "merges":[{"groups":[{"group":1,"groupTitle":"Парламентът прие"},{"group":2,"groupTitle":"Парламентът прие"}],"headline":"x"}]}
         """
         let reviewed = try GroupingAssistant.parseReview(response(answer: review), subjects: [stories[0]], context: [stories[1]])
         #expect(reviewed.hints.isEmpty && reviewed.splits == 0 && reviewed.merges == 0)
@@ -167,8 +167,8 @@ struct GroupingAssistantTests {
     /// The real case: a required "headline" filled with "x" named a group.
     @Test func placeholderHeadlineIsDropped() throws {
         let answer = """
-        {"assignments":[{"article":1,"title":"Депутатите гласуваха","group":2,"groupTitle":"Левски победи","headline":"x"}],
-         "newGroups":[{"articles":[{"article":2,"title":"Shelly Group продадена"},{"article":3,"title":"Шнайдер Електрик купува"}],"headline":"n/a"}]}
+        {"assignments":[{"article":1,"articleTitle":"Депутатите гласуваха","group":2,"groupTitle":"Левски победи","headline":"x"}],
+         "newGroups":[{"articles":[{"article":2,"articleTitle":"Shelly Group продадена"},{"article":3,"articleTitle":"Шнайдер Електрик купува"}],"headline":"n/a"}]}
         """
         let verdict = try GroupingAssistant.parse(response(answer: answer), stories: stories, arrivals: arrivals)
         #expect(verdict.joined == 1 && verdict.formed == 1)
@@ -196,6 +196,32 @@ struct GroupingAssistantTests {
         #expect(AssistLog.trimmed(mid + new, now: now, maxBytes: new.utf8.count) == new)
     }
 
+    /// The real case: the Anthropic IPO under a Latin and a Cyrillic name.
+    /// Claude joined them and echoed the group's wording for the article.
+    @Test func droppedVerdictNamesItsArticleForARetry() throws {
+        let answer = """
+        {"assignments":[{"article":1,"articleTitle":"Парламентът прие бюджета","group":1,"groupTitle":"Парламентът прие бюджета","headline":"Бюджет 2027 приет"}],
+         "newGroups":[{"articles":[{"article":2,"articleTitle":"Shelly Group продадена"},{"article":3,"articleTitle":"Shelly Group"}],"headline":"Schneider купува Shelly"}]}
+        """
+        let verdict = try GroupingAssistant.parse(response(answer: answer), stories: stories, arrivals: arrivals)
+        #expect(verdict.hints.isEmpty && verdict.mismatched == 2)
+        #expect(verdict.dropped == ["a1", "a3"])
+        #expect(verdict.assessed == ["a1", "a2", "a3", "a4"])
+    }
+
+    /// Sorted keys put each number before its echo and the headline last.
+    @Test func schemaOrderPutsTheNumberBeforeItsEcho() throws {
+        let body = String(decoding: GroupingAssistant.requestBody(stories: stories, arrivals: arrivals), as: UTF8.self)
+        let order = ["\"article\":", "\"articleTitle\":", "\"group\":", "\"groupTitle\":", "\"headline\":"]
+        let start = try #require(body.range(of: "\"assignments\""))
+        var at = start.upperBound
+        for key in order {
+            let found = try #require(body.range(of: key, range: at..<body.endIndex))
+            at = found.upperBound
+        }
+        #expect(!body.contains("\"title\""))
+    }
+
     @Test func echoMatchesOnWordsOnly() {
         #expect(GroupingAssistant.echoMatches("„Да, България“ иска", "„Да, България“ иска оставка"))
         #expect(GroupingAssistant.echoMatches("volkswagen id3 neo", "Volkswagen ID.3 Neo е по-добър"))
@@ -210,7 +236,7 @@ struct GroupingAssistantTests {
         let subject = GroupingAssistant.Story(ids: ["t1", "t2", "t3", "t4", "t5"], headline: "x",
                                               members: [("Crash on Trakia", "A"), ("Von der Leyen in Varna", "B"), ("Trakia victims in hospital", "C"), ("Protest against von der Leyen", "D"), ("Spanish minister resigns", "E")])
         let answer = """
-        {"splits":[{"group":1,"title":"Crash on Trakia","stories":[[{"member":1,"title":"Crash on Trakia"},{"member":3,"title":"Trakia victims"}],[{"member":2,"title":"Von der Leyen"},{"member":4,"title":"Protest against"}]]}],
+        {"splits":[{"group":1,"groupTitle":"Crash on Trakia","stories":[[{"member":1,"memberTitle":"Crash on Trakia"},{"member":3,"memberTitle":"Trakia victims"}],[{"member":2,"memberTitle":"Von der Leyen"},{"member":4,"memberTitle":"Protest against"}]]}],
          "merges":[]}
         """
         let verdict = try GroupingAssistant.parseReview(response(answer: answer), subjects: [subject], context: [])
@@ -228,7 +254,7 @@ struct GroupingAssistantTests {
 
         // one story holding everyone is no split
         let whole = """
-        {"splits":[{"group":1,"title":"Crash on Trakia","stories":[[{"member":1,"title":"Crash on Trakia"},{"member":2,"title":"Von der Leyen"},{"member":3,"title":"Trakia victims"},{"member":4,"title":"Protest"},{"member":5,"title":"Spanish minister"}]]}],"merges":[]}
+        {"splits":[{"group":1,"groupTitle":"Crash on Trakia","stories":[[{"member":1,"memberTitle":"Crash on Trakia"},{"member":2,"memberTitle":"Von der Leyen"},{"member":3,"memberTitle":"Trakia victims"},{"member":4,"memberTitle":"Protest"},{"member":5,"memberTitle":"Spanish minister"}]]}],"merges":[]}
         """
         let none = try GroupingAssistant.parseReview(response(answer: whole), subjects: [subject], context: [])
         #expect(none.hints.isEmpty && none.splits == 0)
@@ -238,7 +264,7 @@ struct GroupingAssistantTests {
         var labelled = stories
         labelled[0].label = "Бюджет 2027"
         let answer = """
-        {"assignments":[{"article":1,"title":"Депутатите гласуваха","group":1,"groupTitle":"Парламентът прие","headline":"Депутатите гласуваха"}],"newGroups":[]}
+        {"assignments":[{"article":1,"articleTitle":"Депутатите гласуваха","group":1,"groupTitle":"Парламентът прие","headline":"Депутатите гласуваха"}],"newGroups":[]}
         """
         let verdict = try GroupingAssistant.parse(response(answer: answer), stories: labelled, arrivals: arrivals)
         #expect(verdict.hints.headlines == ["s1": "Бюджет 2027", "s2": "Бюджет 2027", "a1": "Бюджет 2027"])
