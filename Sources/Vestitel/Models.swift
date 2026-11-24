@@ -192,6 +192,9 @@ struct TopicGroup: Identifiable {
     /// mode) rather than a same-story cluster: the block then shows the
     /// source mark and colour, no banner, and one row style for all.
     var sourceFeedID: UUID? = nil
+    /// The section a section block holds (`Sections.key`); nil for a whole
+    /// feed, a feed's "Other" block and topic groups.
+    var sectionKey: String? = nil
 
     var newest: Date { articles.map(\.published).max() ?? .distantPast }
 }
@@ -250,6 +253,9 @@ struct AppSettings: Codable, Equatable {
     /// insensitive substring) never reach the Inbox: they are cleared on
     /// arrival, tagged with the keyword, and reviewable in the Cleared tab.
     var mutedKeywords: [String] = []
+    /// Sections (`Sections.key`, "corner.dir.bg/basketbol") whose articles
+    /// are cleared on arrival like a muted keyword's.
+    var mutedSections: [String] = []
     /// User-defined filtered views of the inbox, in display order: the
     /// first ones get subtabs, the rest go into the "More" menu.
     var smartInboxes: [SmartInbox] = []
@@ -285,6 +291,7 @@ struct AppSettings: Codable, Equatable {
         syncPreferences = try c.decodeIfPresent(Bool.self, forKey: .syncPreferences) ?? false
         autoUpdateEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoUpdateEnabled) ?? true
         mutedKeywords = try c.decodeIfPresent([String].self, forKey: .mutedKeywords) ?? []
+        mutedSections = try c.decodeIfPresent([String].self, forKey: .mutedSections) ?? []
         smartInboxes = try c.decodeIfPresent([SmartInbox].self, forKey: .smartInboxes) ?? []
         aiGroupingEnabled = try c.decodeIfPresent(Bool.self, forKey: .aiGroupingEnabled) ?? false
     }

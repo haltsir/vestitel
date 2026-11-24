@@ -7,9 +7,9 @@ read, clear, and forget.
 
 ![Menu bar icon](docs/screenshots/menubar.png)
 
-| Inbox | A smart inbox |
-|---|---|
-| ![Inbox](docs/screenshots/inbox.png) | ![Smart inbox](docs/screenshots/smart-inbox.png) |
+| Inbox | Sections, folded | A smart inbox |
+|---|---|---|
+| ![Inbox](docs/screenshots/inbox.png) | ![Group by source, sections folded](docs/screenshots/sections.png) | ![Smart inbox](docs/screenshots/smart-inbox.png) |
 
 | What the filters caught | Feeds and sources |
 |---|---|
@@ -43,7 +43,8 @@ remembered in **Archive**; anything you want to keep is a **Bookmark**.
 - **Keyboard triage**: with the Inbox open, ↓ ↑ (or J K) move a cursor through
   the list, Space (or X) clears the row and moves on, Return (or O) opens it,
   B bookmarks, U undoes the last clear. On a block's header Space clears the
-  whole block; ← → fold and unfold it, ⌥← ⌥→ all of them. Esc puts the cursor
+  whole block; ← → fold and unfold it, ⌥← ⌥→ (or Collapse / Expand in the
+  footer) all of them. Esc puts the cursor
   away.
 - **Smart inboxes**: saved views of the Inbox, like Mail's smart mailboxes:
   keywords (any/all) and optional sources. They show as subtabs at the top of
@@ -52,12 +53,16 @@ remembered in **Archive**; anything you want to keep is a **Bookmark**.
 - **Filter**: the magnifier in the Inbox header (or ⌘F) opens a filter field in
   the header for a smart inbox you don't want to save: type words and the Inbox narrows
   to articles whose title, summary, tag or source name contains all of them,
-  inside the selected smart inbox. Open All and Clear Shown act on what is
+  inside the selected smart inbox. Open and Clear act on what is
   shown; Esc dismisses it.
 - **Muted keywords**: articles whose title, summary or tag contains a muted word
   skip the Inbox and go straight to Cleared, tagged with the keyword. The
   Cleared tab's "Filtered" toggle shows what they caught, with Restore if a
-  filter misfires.
+  filter misfires. A whole section of a feed (Dir.bg's basketball) can be
+  ignored the same way: right-click its block in Group by source, or any of
+  its articles.
+- **Clear old articles**: the arrow beside Clear clears only what is
+  older than a day, three days, a week or a month.
 - **Sync between Macs**: point every Mac at the same cloud folder (Google
   Drive, iCloud Drive…). Feeds, read/cleared state, bookmarks and the
   never-show-again list merge with no conflicts: each Mac writes only its own
@@ -72,7 +77,7 @@ remembered in **Archive**; anything you want to keep is a **Bookmark**.
 - **Quiet while you read**: articles that arrive while the popover is open
   wait behind an "N new" button instead of shifting the list under you.
 - **Swipe to clear**, hover × and Open in Browser on every row, right-click
-  menus, copy link, Open All, Clear Inbox.
+  menus, copy link, Open, Clear.
 - **Skip old articles**: optionally ignore anything published more than N days
   ago, so a slow feed's back catalogue never floods the Inbox. **Compact
   rows** for a denser list.

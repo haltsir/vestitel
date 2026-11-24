@@ -35,7 +35,8 @@ final class AppStore: ObservableObject {
     @Published var settings: AppSettings = AppSettings() {
         didSet {
             scheduleRefreshTimer()
-            if settings.mutedKeywords != oldValue.mutedKeywords { applyMutedKeywords() }
+            if settings.mutedKeywords != oldValue.mutedKeywords
+                || settings.mutedSections != oldValue.mutedSections { applyMutedKeywords() }
             if let selected = selectedSmartInboxID,
                !settings.smartInboxes.contains(where: { $0.id == selected }) {
                 selectedSmartInboxID = nil   // the selected view was deleted
@@ -383,7 +384,7 @@ final class AppStore: ObservableObject {
             let members = group.articles.filter { matches($0, scope) }
             guard !members.isEmpty else { return nil }
             return TopicGroup(id: group.id, headline: group.headline, articles: members,
-                              sourceFeedID: group.sourceFeedID)
+                              sourceFeedID: group.sourceFeedID, sectionKey: group.sectionKey)
         }
     }
 
@@ -444,8 +445,14 @@ final class AppStore: ObservableObject {
 
     /// The first muted keyword found in the title, summary or tag, or nil.
     /// Case-insensitive substring match, so "меркурий" also catches
-    /// "Меркурий" and "ретроградния Меркурий".
+    /// "Меркурий" and "ретроградния Меркурий". An article in an ignored
+    /// section (`settings.mutedSections`) is caught the same way, under
+    /// the section's name.
     func mutedKeyword(matching article: Article) -> String? {
+        if !settings.mutedSections.isEmpty, let key = Sections.key(for: article.link),
+           settings.mutedSections.contains(key) {
+            return sectionName(key)
+        }
         let keywords = settings.mutedKeywords
         guard !keywords.isEmpty else { return nil }
         let haystack = Self.searchText(of: article)
@@ -476,6 +483,40 @@ final class AppStore: ObservableObject {
                 articles[i].fetchedAt = now   // respects the inbox hold like any arrival
             }
         }
+    }
+
+    /// What a section is called: the feed's own name for it once a fetch
+    /// has carried one, its slug until then.
+    func sectionName(_ key: String) -> String {
+        sectionLabels[key] ?? Sections.slugLabel(key)
+    }
+
+    /// Ignore a section from now on; what it already has in the Inbox goes
+    /// to Cleared → Filtered with it (`applyMutedKeywords`, from `settings`).
+    func muteSection(_ key: String) {
+        guard !key.isEmpty, !settings.mutedSections.contains(key) else { return }
+        settings.mutedSections.append(key)
+        save()
+    }
+
+    func unmuteSection(_ key: String) {
+        settings.mutedSections.removeAll { $0 == key }
+        save()
+    }
+
+    /// Clears the shown inbox articles published more than `days` ago, as
+    /// one batch that U (keyboard undo) brings back.
+    func clearVisibleInbox(olderThan days: Int) {
+        let cutoff = Date().addingTimeInterval(-Double(days) * 86_400)
+        let ids = Set(visibleInbox.filter { $0.published < cutoff }.map(\.id))
+        guard !ids.isEmpty else { return }
+        let now = Date()
+        for i in articles.indices where ids.contains(articles[i].id) && articles[i].state == .inbox {
+            articles[i].state = .cleared
+            articles[i].clearedAt = now
+        }
+        triageUndo.append(Array(ids))
+        save()
     }
 
     func addMutedKeyword(_ raw: String) {
@@ -681,7 +722,8 @@ final class AppStore: ObservableObject {
                     id: "source|\(feedID.uuidString)|\(bucket.key)",
                     headline: "\(source) · \(label)",
                     articles: bucket.articles,
-                    sourceFeedID: feedID
+                    sourceFeedID: feedID,
+                    sectionKey: bucket.key.isEmpty ? nil : bucket.key
                 )
             }
         }

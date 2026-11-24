@@ -2,6 +2,8 @@ import SwiftUI
 
 struct InboxView: View {
     @EnvironmentObject var store: AppStore
+    /// The footer is showing "Open N tabs?": its other buttons step aside.
+    @State private var openConfirming = false
 
     var body: some View {
         let groups = store.visibleGroupedInbox
@@ -110,23 +112,77 @@ struct InboxView: View {
                 Text("Updated \(last.articleDisplay)")
                     .font(.system(size: 11.5))
                     .foregroundStyle(.tertiary)
+                    .lineLimit(1)
             }
-            Spacer()
+            Spacer(minLength: 0)
+            // Fold or unfold every block at once (⌥← ⌥→ on the keyboard);
+            // only when the list has blocks to fold.
+            let foldable = store.visibleGroupedInbox.filter(\.hasHeader).map(\.id)
+            if !foldable.isEmpty, !openConfirming {
+                let allFolded = foldable.allSatisfy(store.collapsedGroupIDs.contains)
+                Button {
+                    _ = store.triage(allFolded ? .expandAll : .collapseAll)
+                } label: {
+                    // Double chevrons, not the rectangle arrows the
+                    // header's compact-rows toggle wears. The word drops
+                    // out when the row is full (Open's "Open N tabs?"
+                    // question, the key legend).
+                    let icon = Image(systemName: allFolded ? "chevron.down.2" : "chevron.up.2")
+                        .font(.system(size: 11, weight: .semibold))
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 5) {
+                            icon
+                            Text(allFolded ? "Expand" : "Collapse")
+                        }
+                        icon
+                    }
+                    .frame(height: 15)
+                }
+                .buttonStyle(HoverButtonStyle())
+                .help(allFolded ? "Expand all groups (⌥→)" : "Collapse all groups (⌥←)")
+            }
             let visible = store.visibleInbox
             let scoped = store.selectedSmartInbox != nil || store.isInboxFiltering
-            OpenAllButton(count: visible.count) {
+            // fixed, so a full row squeezes the status text and the fold
+            // button's word, never these labels (they wrapped mid-word)
+            OpenAllButton(count: visible.count, title: "Open", onConfirming: { asking in
+                withAnimation(.easeOut(duration: 0.15)) { openConfirming = asking }
+            }) {
                 store.openAll(visible)
             }
-            Button {
-                store.clearVisibleInbox()
-            } label: {
-                Label(scoped ? "Clear Shown" : "Clear Inbox", systemImage: "tray.and.arrow.down")
+            .fixedSize()
+            if !openConfirming {
+            // A split button: the label clears everything shown, the arrow
+            // opens the by-age choices. Two buttons 1 pt apart, the inner
+            // corners square, so they read as one control.
+            HStack(spacing: 1) {
+                Button {
+                    store.clearVisibleInbox()
+                } label: {
+                    Label("Clear", systemImage: "tray.and.arrow.down")
+                }
+                .buttonStyle(HoverButtonStyle(corners: .leading))
+                .help(scoped
+                      ? "Move the articles shown to Cleared (recoverable for 24 hours)"
+                      : "Move all inbox articles to Cleared (recoverable for 24 hours)")
+                Menu {
+                    ForEach([(1, "a Day"), (3, "3 Days"), (7, "a Week"), (30, "a Month")], id: \.0) { days, name in
+                        Button("Clear Older Than \(name)") { store.clearVisibleInbox(olderThan: days) }
+                    }
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9.5, weight: .bold))
+                        .frame(height: 15)
+                }
+                .menuStyle(.button)
+                .buttonStyle(HoverButtonStyle(corners: .trailing, horizontalPadding: 8))
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Clear only the older articles")
             }
-            .buttonStyle(HoverButtonStyle())
+            .fixedSize()
             .disabled(visible.isEmpty)
-            .help(scoped
-                  ? "Move the articles shown to Cleared (recoverable for 24 hours)"
-                  : "Move all inbox articles to Cleared (recoverable for 24 hours)")
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -540,6 +596,12 @@ struct GroupBlock: View {
             // a plain click never reaches it.
             .onTapGesture { toggleCollapsed() }
             .help(collapsed ? "Expand group" : "Collapse group")
+            .contextMenu {
+                Button("Clear \(group.articles.count) Articles") { store.clearGroup(group) }
+                if let key = group.sectionKey {
+                    Button("Ignore “\(store.sectionName(key))”") { store.muteSection(key) }
+                }
+            }
             .gesture(headerDragGesture)
 
             if !collapsed, !headerOnly {

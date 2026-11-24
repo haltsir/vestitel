@@ -419,7 +419,22 @@ struct SettingsView: View {
                 .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
             }
 
-            Text("An article whose title, summary or tag contains a muted keyword (any case) skips the Inbox and goes straight to Cleared, tagged with the keyword. Adding a keyword also clears matching articles already in the Inbox; removing it brings back the ones it caught. Review the catch under Cleared → Filtered.")
+            if !store.settings.mutedSections.isEmpty {
+                Text("Ignored sections")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                VStack(spacing: 0) {
+                    ForEach(store.settings.mutedSections, id: \.self) { key in
+                        MutedSectionRow(key: key)
+                        if key != store.settings.mutedSections.last {
+                            Divider().padding(.leading, 12)
+                        }
+                    }
+                }
+                .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
+            }
+
+            Text("An article whose title, summary or tag contains a muted keyword (any case) skips the Inbox and goes straight to Cleared, tagged with the keyword. Adding a keyword also clears matching articles already in the Inbox; removing it brings back the ones it caught. A section of a feed is ignored the same way: right-click its block in Group by source, or any of its articles. Review the catch under Cleared → Filtered.")
                 .font(.system(size: 11.5))
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1071,6 +1086,42 @@ struct SmartInboxEditor: View {
         }
         .padding(8)
         .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+struct MutedSectionRow: View {
+    @EnvironmentObject var store: AppStore
+    let key: String
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "rectangle.3.group")
+                .foregroundStyle(.secondary)
+            Text(store.sectionName(key))
+                .font(.system(size: 13))
+                .lineLimit(1)
+            Text(key)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+            RowActionButton(
+                icon: "trash",
+                tint: .red,
+                help: "Stop ignoring this section (articles it caught return to the inbox)",
+                visible: hovering
+            ) {
+                store.unmuteSection(key)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
+        .background(hovering ? Color.primary.opacity(0.05) : .clear, in: RoundedRectangle(cornerRadius: 8))
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
     }
 }
 

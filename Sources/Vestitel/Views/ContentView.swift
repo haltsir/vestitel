@@ -227,6 +227,11 @@ struct HeaderButton: View {
 /// window, and the menu bar popover closes on any focus change.
 struct OpenAllButton: View {
     let count: Int
+    /// "Open" in the Inbox footer, which has more buttons to fit.
+    var title = "Open All"
+    /// Told when the "Open N tabs?" question comes and goes, so a crowded
+    /// footer can put its other buttons away for the duration.
+    var onConfirming: (Bool) -> Void = { _ in }
     let action: () -> Void
     @State private var confirming = false
 
@@ -255,7 +260,7 @@ struct OpenAllButton: View {
                         action()
                     }
                 } label: {
-                    Label("Open All", systemImage: "arrow.up.forward.app")
+                    Label(title, systemImage: "arrow.up.forward.app")
                 }
                 .buttonStyle(HoverButtonStyle())
                 .disabled(count == 0)
@@ -265,6 +270,7 @@ struct OpenAllButton: View {
         .animation(.easeOut(duration: 0.15), value: confirming)
         // popover closed or tab switched: never keep a stale question
         .onDisappear { confirming = false }
+        .onChange(of: confirming) { _, asking in onConfirming(asking) }
     }
 }
 
@@ -611,6 +617,10 @@ struct ArticleRow: View {
                     store.toggleRead(article)
                 }
                 Button("Clear Now") { store.clear(article) }
+                if let key = Sections.key(for: article.link),
+                   store.feeds.first(where: { $0.id == article.feedID })?.isLocal == false {
+                    Button("Ignore “\(store.sectionName(key))” from \(article.sourceTitle)") { store.muteSection(key) }
+                }
             } else {
                 Button("Restore to Inbox") { store.restore(article) }
             }
@@ -914,24 +924,36 @@ extension Date {
 /// Text button with a proper hover state (macOS bordered buttons have none).
 /// `prominent` renders it filled with the accent color.
 struct HoverButtonStyle: ButtonStyle {
+    /// Which side keeps its rounded corners: a split button's halves are
+    /// square where they meet.
+    enum Corners { case all, leading, trailing }
     var prominent = false
+    var corners = Corners.all
+    var horizontalPadding: CGFloat = 12
 
     func makeBody(configuration: Configuration) -> some View {
-        HoverBody(configuration: configuration, prominent: prominent)
+        HoverBody(configuration: configuration, prominent: prominent, corners: corners,
+                  horizontalPadding: horizontalPadding)
     }
 
     private struct HoverBody: View {
         let configuration: Configuration
         let prominent: Bool
+        let corners: Corners
+        let horizontalPadding: CGFloat
         @State private var hovering = false
         @Environment(\.isEnabled) private var isEnabled
 
         var body: some View {
             configuration.label
                 .font(.system(size: 12.5, weight: .medium))
-                .padding(.horizontal, 12)
+                .padding(.horizontal, horizontalPadding)
                 .padding(.vertical, 6)
-                .background(background, in: RoundedRectangle(cornerRadius: 7))
+                .background(background, in: UnevenRoundedRectangle(
+                    topLeadingRadius: corners == .trailing ? 0 : 7,
+                    bottomLeadingRadius: corners == .trailing ? 0 : 7,
+                    bottomTrailingRadius: corners == .leading ? 0 : 7,
+                    topTrailingRadius: corners == .leading ? 0 : 7))
                 .foregroundStyle(prominent ? Color.white : .primary)
                 .opacity(configuration.isPressed ? 0.7 : (isEnabled ? 1 : 0.4))
                 .onHover { hovering = isEnabled && $0 }

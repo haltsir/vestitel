@@ -136,7 +136,7 @@ URL, launch Vestitel once and try again.
   can be renamed (the new name shows on its items) and given a colour like any
   feed. It has no refresh button: nothing is fetched, events are pushed in.
 - Events land in the Inbox and behave like articles: clicking opens the `url`
-  and marks the item read (it clears itself 15 minutes later), Clear Inbox
+  and marks the item read (it clears itself 15 minutes later), Clear
   clears them, cleared items stay recoverable for 24 hours, and topic grouping
   can cluster them with related articles.
 - With sync between Macs on, local sources and their events sync too, so an

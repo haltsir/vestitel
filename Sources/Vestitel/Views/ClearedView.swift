@@ -14,7 +14,7 @@ struct ClearedView: View {
             HStack {
                 Label(
                     showingFiltered
-                        ? "Caught by your muted keywords. Restore one if a filter misfires."
+                        ? "Caught by your muted keywords and ignored sections. Restore one if a filter misfires."
                         : "Cleared articles are kept for 24 hours, then removed.",
                     systemImage: showingFiltered ? "line.3.horizontal.decrease.circle" : "info.circle"
                 )
